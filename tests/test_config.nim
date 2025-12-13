@@ -1,6 +1,6 @@
 ## Tests for patroni/config module.
 
-import std/[unittest, json, options, os, tables, strutils]
+import std/[unittest]
 
 suite "Configuration":
   test "load YAML config":

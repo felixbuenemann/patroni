@@ -2,7 +2,7 @@
 ##
 ## This module provides utilities for communicating with the pg-backup-api.
 
-import std/[httpclient, json, logging, os, strformat, strutils, times, uri]
+import std/[httpclient, json, logging, net, os, strformat, strutils, times, uri]
 
 type
   RetriesExceeded* = object of CatchableError

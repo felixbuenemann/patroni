@@ -522,3 +522,107 @@ proc compareVersions*(v1, v2: seq[int]): int =
     elif a > b:
       return 1
   result = 0
+
+# Retry mechanism
+type
+  RetryFailedError* = object of CatchableError
+    ## Exception raised when retry attempts are exhausted.
+
+  Retry* = ref object
+    ## Retry mechanism with configurable parameters.
+    delay*: float
+    maxDelay*: float
+    maxTries*: int
+    deadline*: float
+    attempts*: int
+    curDelay: float
+    startTime: float
+    sleepFunc*: proc(t: float) {.gcsafe.}
+
+proc defaultSleep(t: float) {.gcsafe.} =
+  sleep(int(t * 1000))
+
+proc newRetry*(delay: float = 0.1, maxDelay: float = 3600.0, maxTries: int = 1,
+               deadline: float = 0.0, sleepFunc: proc(t: float) {.gcsafe.} = defaultSleep): Retry =
+  ## Create a new Retry instance.
+  new(result)
+  result.delay = delay
+  result.maxDelay = maxDelay
+  result.maxTries = maxTries
+  result.deadline = deadline
+  result.attempts = 0
+  result.curDelay = delay
+  result.startTime = 0.0
+  result.sleepFunc = sleepFunc
+
+proc reset*(self: Retry) =
+  ## Reset the retry state.
+  self.attempts = 0
+  self.curDelay = self.delay
+  self.startTime = 0.0
+
+proc copy*(self: Retry): Retry =
+  ## Create a copy of the retry instance.
+  result = newRetry(
+    delay = self.delay,
+    maxDelay = self.maxDelay,
+    maxTries = self.maxTries,
+    deadline = self.deadline,
+    sleepFunc = self.sleepFunc
+  )
+
+proc call*[T](self: Retry, fn: proc(): T): T =
+  ## Call a function with retry logic.
+  ## Raises RetryFailedError if all attempts fail.
+  self.startTime = epochTime()
+
+  while true:
+    try:
+      result = fn()
+      return
+    except CatchableError as e:
+      self.attempts += 1
+
+      # Check if max tries exceeded
+      if self.maxTries > 0 and self.attempts >= self.maxTries:
+        raise newException(RetryFailedError, "Maximum retry attempts exceeded: " & e.msg)
+
+      # Check if deadline exceeded
+      if self.deadline > 0.0:
+        let elapsed = epochTime() - self.startTime
+        if elapsed >= self.deadline:
+          raise newException(RetryFailedError, "Retry deadline exceeded: " & e.msg)
+
+      # Sleep before next attempt
+      self.sleepFunc(self.curDelay)
+
+      # Exponential backoff
+      self.curDelay = min(self.curDelay * 2, self.maxDelay)
+
+proc call*(self: Retry, fn: proc() {.gcsafe.}) =
+  ## Call a void function with retry logic.
+  ## Raises RetryFailedError if all attempts fail.
+  self.startTime = epochTime()
+
+  while true:
+    try:
+      fn()
+      return
+    except CatchableError as e:
+      self.attempts += 1
+
+      # Check if max tries exceeded
+      if self.maxTries > 0 and self.attempts >= self.maxTries:
+        raise newException(RetryFailedError, "Maximum retry attempts exceeded: " & e.msg)
+
+      # Check if deadline exceeded
+      if self.deadline > 0.0:
+        let elapsed = epochTime() - self.startTime
+        if elapsed >= self.deadline:
+          raise newException(RetryFailedError, "Retry deadline exceeded: " & e.msg)
+
+      # Sleep before next attempt
+      self.sleepFunc(self.curDelay)
+
+      # Exponential backoff
+      self.curDelay = min(self.curDelay * 2, self.maxDelay)

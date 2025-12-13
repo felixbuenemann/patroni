@@ -1,6 +1,6 @@
 ## Tests for patroni/callback_executor module.
 
-import std/[unittest, os]
+import std/[unittest]
 
 suite "Callback Executor":
   test "execute callback":

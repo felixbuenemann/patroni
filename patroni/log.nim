@@ -4,7 +4,8 @@
 ## and is later asynchronously flushed by a thread to the final destination.
 
 import std/[os, strutils, strformat, times, locks, deques, options, tables]
-import ./utils
+when defined(posix):
+  import posix
 
 type
   LogLevel* {.pure.} = enum
@@ -125,7 +126,7 @@ proc newFileHandler*(filename: string, level: LogLevel = LogLevel.Debug,
 
   # Set file permissions
   when defined(posix):
-    discard chmod(filename.cstring, mode.cint)
+    discard chmod(filename.cstring, Mode(mode))
 
 proc newQueueHandler*(maxSize: int = 10000): QueueHandler =
   ## Create a new QueueHandler for async logging.
@@ -137,11 +138,11 @@ proc newQueueHandler*(maxSize: int = 10000): QueueHandler =
   result.level = LogLevel.Debug
   result.formatter = newLogFormatter()
 
-method emit*(h: LogHandler, record: LogRecord) {.base.} =
+method emit*(h: LogHandler, record: LogRecord) {.base, gcsafe.} =
   ## Base emit method - must be overridden.
   discard
 
-method emit*(h: StreamHandler, record: LogRecord) =
+method emit*(h: StreamHandler, record: LogRecord) {.gcsafe.} =
   ## Emit a log record to the stream.
   if record.level.ord >= h.level.ord:
     let msg = if record.formatted.len > 0: record.formatted
@@ -149,7 +150,7 @@ method emit*(h: StreamHandler, record: LogRecord) =
     h.stream.writeLine(msg)
     h.stream.flushFile()
 
-method emit*(h: FileHandler, record: LogRecord) =
+method emit*(h: FileHandler, record: LogRecord) {.gcsafe.} =
   ## Emit a log record to the file with optional rotation.
   if record.level.ord >= h.level.ord:
     let msg = if record.formatted.len > 0: record.formatted
@@ -176,7 +177,7 @@ method emit*(h: FileHandler, record: LogRecord) =
     h.file.flushFile()
     h.currentBytes += msg.len + 1
 
-method emit*(h: QueueHandler, record: LogRecord) =
+method emit*(h: QueueHandler, record: LogRecord) {.gcsafe.} =
   ## Emit a log record to the queue.
   if record.level.ord >= h.level.ord:
     withLock(h.lock):

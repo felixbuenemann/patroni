@@ -1,6 +1,6 @@
 ## Tests for patroni/async_executor module.
 
-import std/[unittest, locks, os]
+import std/[unittest]
 
 # Note: The async_executor module would need to be ported to Nim first.
 # This is a placeholder test structure matching the Python tests.

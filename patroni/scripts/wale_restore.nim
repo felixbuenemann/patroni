@@ -22,7 +22,7 @@
 ## This script depends on an envdir defining the S3 bucket (or SWIFT dir),
 ## and login credentials per WAL-E documentation.
 
-import std/[logging, os, osproc, parseopt, sequtils, strformat, strutils, tables, times]
+import std/[os, osproc, parseopt, strformat, strutils, tables, options, math]
 import ../psycopg
 import ../log
 
@@ -67,7 +67,7 @@ proc getMajorVersion*(dataDir: string): float =
       let content = readFile(versionFile).strip()
       return parseFloat(content)
     except:
-      logger.log(lvlError, fmt"Failed to read PG_VERSION from {dataDir}")
+      logger.error(fmt"Failed to read PG_VERSION from {dataDir}")
   return 0.0
 
 proc reprSize*(nBytes: float): string =
@@ -154,16 +154,16 @@ proc shouldUseS3ToCreateReplica*(self: WALERestore): Option[bool] =
 
   # Get latest backup info from wal-e
   var cmd = self.walE.cmd & @["backup-list", "--detail", "LATEST"]
-  logger.log(lvlDebug, fmt"calling {cmd}")
+  logger.debug(fmt"calling {cmd}")
 
   let (waleOutput, exitCode) = execCmdEx(cmd.join(" "))
   if exitCode != 0:
-    logger.log(lvlError, "could not query wal-e latest backup")
+    logger.error("could not query wal-e latest backup")
     return none(bool)
 
   let backupInfoOpt = parseBackupList(waleOutput)
   if backupInfoOpt.isNone:
-    logger.log(lvlWarn, "wal-e did not find any backups")
+    logger.warning("wal-e did not find any backups")
     return some(false)
 
   let backupInfo = backupInfoOpt.get
@@ -176,7 +176,7 @@ proc shouldUseS3ToCreateReplica*(self: WALERestore): Option[bool] =
     backupStartSegment = backupInfo["wal_segment_backup_start"]
     backupStartOffset = backupInfo["wal_segment_offset_backup_start"]
   except KeyError:
-    logger.log(lvlError, "unable to get some of WALE backup parameters")
+    logger.error("unable to get some of WALE backup parameters")
     return none(bool)
 
   # WAL filename is XXXXXXXXYYYYYYYY000000ZZ
@@ -219,7 +219,7 @@ proc shouldUseS3ToCreateReplica*(self: WALERestore): Option[bool] =
         break
 
       except PostgresError:
-        logger.log(lvlError, "could not determine difference with the leader location")
+        logger.error("could not determine difference with the leader location")
         if attemptsNo < self.retries:
           inc attemptsNo
           sleep(RETRY_SLEEP_INTERVAL * 1000)
@@ -227,7 +227,7 @@ proc shouldUseS3ToCreateReplica*(self: WALERestore): Option[bool] =
         else:
           if not self.noLeader:
             return some(false)
-          logger.log(lvlInfo, "continue with base backup from S3 since leader is not available")
+          logger.info("continue with base backup from S3 since leader is not available")
           diffInBytes = 0
           break
       finally:
@@ -253,9 +253,9 @@ proc shouldUseS3ToCreateReplica*(self: WALERestore): Option[bool] =
                      fmt"is_percentage_thresh_ok={isPercentageThreshOk}"
 
   if not areThresholdsOk:
-    logger.log(lvlInfo, fmt"wal-e backup size diff is over threshold, falling back to other means of restore: {humanContext}")
+    logger.info(fmt"wal-e backup size diff is over threshold, falling back to other means of restore: {humanContext}")
   else:
-    logger.log(lvlInfo, fmt"Thresholds are OK, using wal-e basebackup: {humanContext}")
+    logger.info(fmt"Thresholds are OK, using wal-e basebackup: {humanContext}")
 
   return some(areThresholdsOk)
 
@@ -270,13 +270,13 @@ proc fixSubdirectoryPathIfBroken*(self: WALERestore, dirname: string): bool =
         let target = expandSymlink(path)
         removeFile(path)
       except OSError:
-        logger.log(lvlError, fmt"could not remove broken {dirname} symlink")
+        logger.error(fmt"could not remove broken {dirname} symlink")
         return false
 
     try:
       createDir(path)
     except OSError:
-      logger.log(lvlError, fmt"could not create missing {dirname} directory path")
+      logger.error(fmt"could not create missing {dirname} directory path")
       return false
 
   return true
@@ -284,7 +284,7 @@ proc fixSubdirectoryPathIfBroken*(self: WALERestore, dirname: string): bool =
 proc createReplicaWithS3*(self: WALERestore): int =
   ## Restore replica using wal-e backup-fetch.
   var cmd = self.walE.cmd & @["backup-fetch", self.dataDir, "LATEST"]
-  logger.log(lvlDebug, fmt"calling: {cmd}")
+  logger.debug(fmt"calling: {cmd}")
 
   try:
     let exitCode = execCmd(cmd.join(" "))
@@ -294,7 +294,7 @@ proc createReplicaWithS3*(self: WALERestore): int =
         return int(ecFail)
     return exitCode
   except:
-    logger.log(lvlError, "Error when fetching backup with WAL-E")
+    logger.error("Error when fetching backup with WAL-E")
     return int(ecRetryLater)
 
 proc run*(self: WALERestore): int =
@@ -305,7 +305,7 @@ proc run*(self: WALERestore): int =
   ##   1 = Error, try again
   ##   2 = Error, don't try again
   if self.initError:
-    logger.log(lvlError, fmt"init error: {self.walE.envDir} did not exist at initialization time")
+    logger.error(fmt"init error: {self.walE.envDir} did not exist at initialization time")
     return int(ecFail)
 
   try:
@@ -317,7 +317,7 @@ proc run*(self: WALERestore): int =
     else:
       return int(ecFail)
   except:
-    logger.log(lvlError, "Unhandled exception when running WAL-E restore")
+    logger.error("Unhandled exception when running WAL-E restore")
   return int(ecFail)
 
 proc main*(): int =
@@ -377,7 +377,7 @@ proc main*(): int =
     )
     exitCode = restore.run()
     if exitCode != int(ecRetryLater):
-      logger.log(lvlDebug, fmt"exit_code is {exitCode}, not retrying")
+      logger.debug(fmt"exit_code is {exitCode}, not retrying")
       break
     sleep(RETRY_SLEEP_INTERVAL * 1000)
 

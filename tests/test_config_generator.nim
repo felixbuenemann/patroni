@@ -1,6 +1,6 @@
 ## Tests for patroni/config_generator module.
 
-import std/[unittest, json, options, tables]
+import std/[unittest]
 
 suite "Config Generator":
   test "generate sample config":

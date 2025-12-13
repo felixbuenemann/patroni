@@ -1,17 +1,20 @@
 ## Tests for patroni/postgresql/cancellable module.
 
-import std/[unittest, os, osproc]
+import std/[unittest]
 import ../patroni/exceptions
 
 # Note: The cancellable module would need to be ported to Nim first.
 # This is a placeholder test structure matching the Python tests.
 
 type
+  MockProcess = ref object
+    ## Mock process for testing
+
   CancellableSubprocess* = ref object
     ## A subprocess that can be cancelled.
     cancelled*: bool
-    process*: Process
-    processChildren*: seq[Process]
+    process*: MockProcess
+    processChildren*: seq[MockProcess]
 
 proc newCancellableSubprocess*(): CancellableSubprocess =
   new(result)

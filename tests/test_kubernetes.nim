@@ -1,6 +1,6 @@
 ## Tests for patroni/dcs/kubernetes module.
 
-import std/[unittest, json, options, httpclient, strutils, tables]
+import std/[unittest]
 
 suite "Kubernetes DCS":
   test "kubernetes client initialization":

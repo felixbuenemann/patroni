@@ -1,6 +1,6 @@
 ## Tests for patroni/postgresql/rewind module.
 
-import std/[unittest, os]
+import std/[unittest]
 
 suite "pg_rewind":
   test "check rewind possible":

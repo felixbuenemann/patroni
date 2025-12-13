@@ -1,6 +1,6 @@
 ## Tests for patroni/bootstrap module.
 
-import std/[unittest, os]
+import std/[unittest]
 
 suite "Bootstrap":
   test "initdb":

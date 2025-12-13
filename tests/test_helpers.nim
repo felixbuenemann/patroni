@@ -2,7 +2,7 @@
 ##
 ## Provides mock objects, test fixtures, and common test utilities.
 
-import std/[unittest, tables, times, json, options, os, strutils, sequtils]
+import std/[unittest, tables, options, os, strutils]
 import ../patroni/utils
 import ../patroni/exceptions
 import ../patroni/dcs/dcs

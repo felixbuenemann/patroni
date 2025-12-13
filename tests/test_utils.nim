@@ -1,6 +1,6 @@
 ## Tests for patroni/utils module.
 
-import std/[unittest, os, options, strutils, times, tables, json]
+import std/[unittest, options, times, tables, json, strutils]
 import ../patroni/utils
 
 suite "Parse Functions":

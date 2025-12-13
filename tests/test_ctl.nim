@@ -1,6 +1,6 @@
 ## Tests for patroni/ctl module (patronictl CLI).
 
-import std/[unittest, json, strutils]
+import std/[unittest]
 
 suite "PatroniCtl Commands":
   test "list command":

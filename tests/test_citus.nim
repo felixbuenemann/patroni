@@ -1,6 +1,6 @@
 ## Tests for patroni/postgresql/mpp/citus module.
 
-import std/[unittest, json, tables]
+import std/[unittest]
 
 suite "Citus MPP":
   test "citus initialization":

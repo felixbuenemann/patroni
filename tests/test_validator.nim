@@ -1,6 +1,6 @@
 ## Tests for patroni/validator module.
 
-import std/[unittest, json]
+import std/[unittest]
 
 suite "Validator":
   test "validate schema":

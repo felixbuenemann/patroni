@@ -1,6 +1,6 @@
 ## Tests for patroni/file_perm module.
 
-import std/[unittest, os]
+import std/[unittest]
 when defined(posix):
   import posix
 

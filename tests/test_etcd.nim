@@ -1,6 +1,6 @@
 ## Tests for patroni/dcs/etcd module.
 
-import std/[unittest, json, options, httpclient, strutils, tables]
+import std/[unittest]
 import ../patroni/dcs/dcs
 
 suite "Etcd DCS":

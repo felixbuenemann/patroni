@@ -1,6 +1,6 @@
 ## Tests for patroni/postgresql/slots module.
 
-import std/[unittest, tables]
+import std/[unittest]
 
 suite "Replication Slots":
   test "physical slots":

@@ -1,6 +1,6 @@
 ## Tests for patroni/scripts/wale_restore module.
 
-import std/[unittest, os, strutils, options, osproc, times]
+import std/[unittest, strutils]
 import ../patroni/scripts/wale_restore
 
 # Test data constants matching Python tests
@@ -22,34 +22,36 @@ suite "WALERestore":
       datadir = "/data",
       connstring = "host=batman port=5432 user=batman",
       envDir = "/etc",
-      threshold = 100,
+      thresholdMb = 100,
+      thresholdPct = 30,
       useIam = 0,
-      noLeader = 0,
+      noLeader = false,
       retries = WALE_TEST_RETRIES
     )
 
   test "newWALERestore creates instance":
     check restore.scope == "batman"
-    check restore.datadir == "/data"
-    check restore.threshold == 100
+    check restore.dataDir == "/data"
+    check restore.walE.thresholdMb == 100
 
   test "init_error flag":
     var badRestore = newWALERestore(
       scope = "",
       datadir = "",
       connstring = "",
-      envDir = "",
-      threshold = 0,
+      envDir = "/nonexistent/path",
+      thresholdMb = 0,
+      thresholdPct = 0,
       useIam = 0,
-      noLeader = 0,
+      noLeader = false,
       retries = 0
     )
-    # Empty scope/datadir should set init_error
-    # This depends on implementation validation
+    # Non-existent envDir should set initError
+    check badRestore.initError == true
 
   test "run with init_error returns FAIL":
     restore.initError = true
-    check restore.run() == ecFail
+    check restore.run() == int(ExitCode.ecFail)
 
 suite "WALERestore Backup Parsing":
   test "parseWaleOutput valid output":
@@ -89,32 +91,12 @@ suite "WALERestore Threshold Check":
 
 suite "WALERestore Exit Codes":
   test "exit code values":
-    check ord(ecSuccess) == 0
-    check ord(ecRetryLater) == 1
-    check ord(ecFail) == 2
+    check ord(ExitCode.ecSuccess) == 0
+    check ord(ExitCode.ecRetryLater) == 1
+    check ord(ExitCode.ecFail) == 2
 
-suite "Major Version":
-  test "getMajorVersion from PG_VERSION file format":
-    # PostgreSQL 9.x format: "9.6"
-    check parseMajorVersion("9.6") == 9.6
-    check parseMajorVersion("9.4") == 9.4
-
-  test "getMajorVersion from PG 10+ format":
-    # PostgreSQL 10+ format: "10", "11", etc.
-    check parseMajorVersion("10") == 10.0
-    check parseMajorVersion("15") == 15.0
-
-  test "getMajorVersion invalid returns 0":
-    check parseMajorVersion("") == 0.0
-    check parseMajorVersion("invalid") == 0.0
-
-suite "Subdirectory Fix":
-  test "fix broken symlinks":
-    # Test the fix_subdirectory_path_if_broken logic
-    # This would require filesystem mocking
-    check true  # Placeholder
-
-proc parseMajorVersion(version: string): float =
+# Helper proc for Major Version tests
+proc parseMajorVersionString(version: string): float =
   ## Helper to parse PostgreSQL major version string.
   if version.len == 0:
     return 0.0
@@ -122,6 +104,27 @@ proc parseMajorVersion(version: string): float =
     result = parseFloat(version)
   except ValueError:
     result = 0.0
+
+suite "Major Version":
+  test "getMajorVersion from PG_VERSION file format":
+    # PostgreSQL 9.x format: "9.6"
+    check parseMajorVersionString("9.6") == 9.6
+    check parseMajorVersionString("9.4") == 9.4
+
+  test "getMajorVersion from PG 10+ format":
+    # PostgreSQL 10+ format: "10", "11", etc.
+    check parseMajorVersionString("10") == 10.0
+    check parseMajorVersionString("15") == 15.0
+
+  test "getMajorVersion invalid returns 0":
+    check parseMajorVersionString("") == 0.0
+    check parseMajorVersionString("invalid") == 0.0
+
+suite "Subdirectory Fix":
+  test "fix broken symlinks":
+    # Test the fix_subdirectory_path_if_broken logic
+    # This would require filesystem mocking
+    check true  # Placeholder
 
 when isMainModule:
   discard

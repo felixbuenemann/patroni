@@ -4,7 +4,7 @@
 ## when Patroni role changes occur. Used as a callback for
 ## on_start, on_stop, and on_role_change events.
 
-import std/[httpclient, json, logging, os, strformat, strutils, times]
+import std/[httpclient, json, os, strformat, strutils, times]
 import ../utils
 import ../log
 
@@ -70,7 +70,7 @@ proc newAWSConnection*(clusterName: string = ""): AWSConnection =
   try:
     let token = getIMDSToken()
     if token.len == 0:
-      logger.log(lvlError, "cannot query AWS meta-data: failed to get IMDS token")
+      logger.error("cannot query AWS meta-data: failed to get IMDS token")
       return
 
     let document = getInstanceDocument(token)
@@ -78,7 +78,7 @@ proc newAWSConnection*(clusterName: string = ""): AWSConnection =
     result.region = document["region"].getStr()
     result.available = true
   except:
-    logger.log(lvlError, "cannot query AWS meta-data")
+    logger.error("cannot query AWS meta-data")
 
 proc awsAvailable*(self: AWSConnection): bool =
   ## Check if AWS is available.
@@ -171,12 +171,12 @@ proc onRoleChange*(self: AWSConnection, newRole: string): bool =
       self.retry.call(tagEC2)
       self.retry.call(tagEBS)
     except RetryFailedError:
-      logger.log(lvlWarn, fmt"Unable to communicate to AWS when setting tags for the EC2 instance {self.instanceId} and attached EBS volumes")
+      logger.warning(fmt"Unable to communicate to AWS when setting tags for the EC2 instance {self.instanceId} and attached EBS volumes")
       return false
 
     return true
   except:
-    logger.log(lvlWarn, fmt"Unable to communicate to AWS when setting tags for the EC2 instance {self.instanceId} and attached EBS volumes")
+    logger.warning(fmt"Unable to communicate to AWS when setting tags for the EC2 instance {self.instanceId} and attached EBS volumes")
     return false
 
 proc main*(): int =

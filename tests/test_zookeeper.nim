@@ -1,6 +1,6 @@
 ## Tests for patroni/dcs/zookeeper module.
 
-import std/[unittest, json, options, strutils, tables]
+import std/[unittest]
 
 suite "ZooKeeper DCS":
   test "zookeeper client initialization":

@@ -1,6 +1,6 @@
 ## Tests for patroni/dcs/etcd3 module.
 
-import std/[unittest, json, options, httpclient, strutils, tables]
+import std/[unittest]
 
 suite "Etcd3 DCS":
   test "etcd3 client initialization":

@@ -1,6 +1,6 @@
 ## Tests for patroni/api module (REST API).
 
-import std/[unittest, json, httpclient, strutils]
+import std/[unittest]
 
 suite "REST API Server":
   test "server initialization":

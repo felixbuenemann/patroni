@@ -1,6 +1,6 @@
 ## Tests for patroni/ha module (High Availability).
 
-import std/[unittest, json, options, tables, times]
+import std/[unittest]
 
 suite "HA State Machine":
   test "state transitions":

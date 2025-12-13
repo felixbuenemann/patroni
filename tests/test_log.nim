@@ -1,6 +1,6 @@
 ## Tests for patroni/log module.
 
-import std/[unittest, logging]
+import std/[unittest]
 
 suite "Logging":
   test "log initialization":

@@ -1,6 +1,6 @@
 ## Tests for patroni/dcs/exhibitor module.
 
-import std/[unittest, json, options, httpclient]
+import std/[unittest]
 
 suite "Exhibitor":
   test "exhibitor discovery":

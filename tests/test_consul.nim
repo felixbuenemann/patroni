@@ -1,6 +1,6 @@
 ## Tests for patroni/dcs/consul module.
 
-import std/[unittest, json, options, httpclient, strutils, tables]
+import std/[unittest]
 
 suite "Consul DCS":
   test "consul client initialization":

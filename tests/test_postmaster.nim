@@ -1,6 +1,6 @@
 ## Tests for patroni/postgresql/postmaster module.
 
-import std/[unittest, os]
+import std/[unittest]
 
 suite "Postmaster":
   test "detect running postmaster":

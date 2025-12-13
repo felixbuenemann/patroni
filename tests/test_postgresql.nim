@@ -1,6 +1,6 @@
 ## Tests for patroni/postgresql module.
 
-import std/[unittest, json, options, os, tables, strutils]
+import std/[unittest]
 
 suite "PostgreSQL":
   test "postgresql initialization":

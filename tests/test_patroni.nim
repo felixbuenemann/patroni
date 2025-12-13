@@ -1,6 +1,6 @@
 ## Tests for patroni main module.
 
-import std/[unittest, json, os]
+import std/[unittest]
 
 suite "Patroni Main":
   test "patroni initialization":

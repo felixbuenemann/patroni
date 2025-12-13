@@ -1,6 +1,6 @@
 ## Tests for patroni/dcs/raft module.
 
-import std/[unittest, json, options, strutils]
+import std/[unittest]
 
 suite "Raft DCS":
   test "raft initialization":

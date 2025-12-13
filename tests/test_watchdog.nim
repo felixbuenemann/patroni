@@ -1,6 +1,6 @@
 ## Tests for patroni/watchdog module.
 
-import std/[unittest, os]
+import std/[unittest]
 
 suite "Watchdog":
   test "watchdog initialization":
