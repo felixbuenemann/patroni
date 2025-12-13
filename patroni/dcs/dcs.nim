@@ -34,7 +34,7 @@ type
     name*: string
     session*: SessionType
     data*: MemberData
-    replicatefromValue: string
+    replicatefromValue*: string
 
   RemoteMember* = ref object of Member
     ## A remote member (typically leader info from DCS)

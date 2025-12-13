@@ -3,9 +3,9 @@
 ## This module provides types and procedures for managing PostgreSQL
 ## synchronous_standby_names and related synchronous replication features.
 
-import std/[algorithm, locks, options, re, sequtils, strformat, strutils, tables, times]
+import std/[algorithm, json, locks, options, re, sequtils, strformat, strutils, tables, times]
 import ../collections
-import ../dcs
+import ../dcs/dcs
 import ../global_config
 import ../log
 import ../psycopg
@@ -281,16 +281,16 @@ proc shouldCascade(members: CaseInsensitiveDict[Member],
                    replication: CaseInsensitiveDict[JsonNode],
                    member: Member): bool =
   ## Check whether member should cascade from another standby node.
-  if member.replicatefrom.len == 0 or member.replicatefrom notin members:
+  if member.replicatefromValue.len == 0 or member.replicatefromValue notin members:
     return false
 
-  let upstream = members[member.replicatefrom]
-  if upstream.replicatefrom.len == 0:
+  let upstream = members[member.replicatefromValue]
+  if upstream.replicatefromValue.len == 0:
     return upstream.name in replication
 
   return shouldCascade(members, replication, upstream)
 
-proc newReplicaList*(postgresql: pointer, cluster: Cluster): ReplicaList =
+proc newReplicaList*(postgresql: pointer, cluster: dcs.Cluster): ReplicaList =
   ## Create a ReplicaList from cluster state.
   new(result)
   result.replicas = @[]
@@ -310,7 +310,7 @@ proc handleSynchronousStandbyNamesChange(self: SyncHandler) =
   # This would need access to Postgresql methods
   discard
 
-proc processReplicaReadiness(self: SyncHandler, cluster: Cluster,
+proc processReplicaReadiness(self: SyncHandler, cluster: dcs.Cluster,
                              replicaList: ReplicaList) =
   ## Flag replicas as truly synchronous when they have caught up.
   for replica in replicaList.replicas:
@@ -321,7 +321,7 @@ proc processReplicaReadiness(self: SyncHandler, cluster: Cluster,
         if replica.syncState in ["sync", "quorum", "potential"]:
           self.readyReplicas[replica.applicationName] = replica.pid
 
-proc currentState*(self: SyncHandler, cluster: Cluster): SyncState =
+proc currentState*(self: SyncHandler, cluster: dcs.Cluster): SyncState =
   ## Find the best candidates to be synchronous standbys.
   ##
   ## :param cluster: current cluster topology from DCS
@@ -335,8 +335,8 @@ proc currentState*(self: SyncHandler, cluster: Cluster): SyncState =
   var syncConfirmed = newCaseInsensitiveSet()
 
   let globalConf = getGlobalConfig()
-  let syncNodeCount = globalConf.getOrDefault("synchronous_node_count").getInt(1)
-  let syncNodeMaxlag = globalConf.getOrDefault("maximum_lag_on_syncnode").getInt(0)
+  let syncNodeCount = globalConf.synchronousNodeCount()
+  let syncNodeMaxlag = globalConf.maximumLagOnSyncnode()
 
   # Sort replicas preferring those without nofailover
   var sortedReplicas = replicaList.replicas.sorted(proc(a, b: Replica): int =
@@ -388,7 +388,7 @@ proc setSynchronousStandbyNames*(self: SyncHandler, sync: seq[string],
   if syncList.len > 1:
     let joined = syncList.join(",")
     let globalConf = getGlobalConfig()
-    let isQuorumMode = globalConf.getOrDefault("synchronous_mode").getStr("") == "quorum"
+    let isQuorumMode = globalConf.isQuorumCommitMode()
 
     if isQuorumMode:
       syncParam = fmt"ANY {effectiveNum} ({joined})"

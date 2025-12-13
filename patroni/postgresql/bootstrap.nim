@@ -3,10 +3,10 @@
 ## This module provides functionality for bootstrapping PostgreSQL instances,
 ## including initial database creation and custom bootstrap methods.
 
-import std/[json, options, os, osproc, sequtils, strformat, strutils, tables, tempfiles, times]
+import std/[json, options, os, osproc, sequtils, strformat, strtabs, strutils, tables, tempfiles, times]
 import ../async_executor
 import ../collections
-import ../dcs
+import ../dcs/dcs
 import ../log
 import ../psycopg
 import ../utils
@@ -15,6 +15,17 @@ import ./misc
 export misc
 
 let logger = getLogger("patroni.postgresql.bootstrap")
+
+proc unquote*(value: string): string =
+  ## Remove surrounding quotes from a string value.
+  ##
+  ## :param value: The potentially quoted string.
+  ## :returns: The string without surrounding quotes.
+  if value.len >= 2:
+    if (value[0] == '\'' and value[^1] == '\'') or
+       (value[0] == '"' and value[^1] == '"'):
+      return value[1..^2]
+  return value
 
 type
   Bootstrap* = ref object
@@ -299,8 +310,27 @@ proc cloneWithCustomMethod*(self: Bootstrap, cloneFrom: Member,
 
   # Set up environment with source connection info
   var env = newStringTable()
-  env["PATRONI_CLONE_FROM_HOST"] = cloneFrom.host
-  env["PATRONI_CLONE_FROM_PORT"] = $cloneFrom.port
+  env["PATRONI_CLONE_FROM_URL"] = cloneFrom.connUrl
+  # Parse connection URL to get host/port if needed
+  if cloneFrom.connUrl.len > 0:
+    # Simple extraction from postgres://host:port/db format
+    let url = cloneFrom.connUrl
+    var hostPort = ""
+    if "://" in url:
+      let afterScheme = url.split("://")[1]
+      let beforeDb = afterScheme.split("/")[0]
+      # Remove any user:pass@ prefix
+      if "@" in beforeDb:
+        hostPort = beforeDb.split("@")[^1]
+      else:
+        hostPort = beforeDb
+      if ":" in hostPort:
+        let parts = hostPort.split(":")
+        env["PATRONI_CLONE_FROM_HOST"] = parts[0]
+        env["PATRONI_CLONE_FROM_PORT"] = parts[1]
+      else:
+        env["PATRONI_CLONE_FROM_HOST"] = hostPort
+        env["PATRONI_CLONE_FROM_PORT"] = "5432"
 
   let exitCode = execShellCmd(command)
   result = exitCode == 0
