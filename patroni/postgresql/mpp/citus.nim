@@ -4,12 +4,12 @@
 ## managing pg_dist_node metadata and worker coordination.
 
 import std/[hashes, json, locks, logging, options, re, sequtils, sets, strformat, strutils, tables, times, uri]
-import ../../dcs/dcs
+import ../../dcs
 import ../../psycopg
 import ../../utils
 import ../../log
 import ../misc
-import ./mpp
+import ../mpp
 
 export mpp
 

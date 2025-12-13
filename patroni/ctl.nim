@@ -7,7 +7,7 @@
 
 import std/[os, json, strutils, strformat, tables, times, options, terminal, parseopt]
 import ./config
-import ./dcs/dcs
+import ./dcs
 import ./exceptions
 import ./request
 import ./utils

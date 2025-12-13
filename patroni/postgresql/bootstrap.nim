@@ -6,7 +6,7 @@
 import std/[json, options, os, osproc, sequtils, strformat, strtabs, strutils, tables, tempfiles, times]
 import ../async_executor
 import ../collections
-import ../dcs/dcs
+import ../dcs
 import ../log
 import ../psycopg
 import ../utils

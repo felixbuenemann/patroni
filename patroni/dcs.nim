@@ -1,10 +1,10 @@
 ## Abstract classes for Distributed Configuration Store.
 
 import std/[tables, json, options, strutils, times, re, locks, uri, strformat, os]
-import ../global_config
-import ../exceptions
-import ../tags
-import ../utils
+import ./global_config
+import ./exceptions
+import ./tags
+import ./utils
 
 export global_config, exceptions, tags
 

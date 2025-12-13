@@ -7,7 +7,7 @@ import std/[json, locks, options, tables, times, strformat, strutils, os]
 import ./async_executor
 import ./collections
 import ./config
-import ./dcs/dcs
+import ./dcs
 import ./exceptions
 import ./global_config
 import ./log

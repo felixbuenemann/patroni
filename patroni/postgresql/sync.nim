@@ -5,7 +5,7 @@
 
 import std/[algorithm, json, locks, options, re, sequtils, strformat, strutils, tables, times]
 import ../collections
-import ../dcs/dcs
+import ../dcs
 import ../global_config
 import ../log
 import ../psycopg

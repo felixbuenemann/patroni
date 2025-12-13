@@ -1,7 +1,7 @@
 ## Tests for patroni/dcs/etcd module.
 
 import std/[unittest]
-import ../patroni/dcs/dcs
+import ../patroni/dcs
 
 suite "Etcd DCS":
   test "etcd client initialization":

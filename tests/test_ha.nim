@@ -6,7 +6,7 @@
 
 import std/[unittest, json, tables, options]
 import ../patroni/ha
-import ../patroni/dcs/dcs
+import ../patroni/dcs
 
 suite "HaState Enum":
   test "state values are correct":

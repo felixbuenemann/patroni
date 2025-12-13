@@ -2,7 +2,7 @@
 
 import std/[os, json, strutils, tables, options, strformat]
 import ./collections
-import ./dcs/dcs
+import ./dcs
 import ./exceptions
 import ./log
 import ./utils

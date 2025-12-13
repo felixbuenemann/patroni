@@ -5,9 +5,9 @@
 ## management.
 
 import std/[json, re, strformat, strutils, tables]
-import ../../dcs
-import ../../exceptions
-import ../../log
+import ../dcs
+import ../exceptions
+import ../log
 
 let logger = getLogger("patroni.postgresql.mpp")
 

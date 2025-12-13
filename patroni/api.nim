@@ -7,7 +7,7 @@
 
 import std/[asynchttpserver, asyncdispatch, json, strutils, tables, times, net, strformat, locks, options, uri]
 import ./config
-import ./dcs/dcs
+import ./dcs
 import ./exceptions
 import ./global_config
 import ./log

@@ -5,7 +5,7 @@
 import std/[unittest, tables, options, os, strutils]
 import ../patroni/utils
 import ../patroni/exceptions
-import ../patroni/dcs/dcs
+import ../patroni/dcs
 
 type
   SleepException* = object of CatchableError

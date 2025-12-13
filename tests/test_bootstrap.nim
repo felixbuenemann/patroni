@@ -4,7 +4,7 @@
 ## initdb options processing, custom bootstrap methods, and user creation.
 
 import std/[unittest, json, tables, strutils, options]
-import ../patroni/dcs/dcs
+import ../patroni/dcs
 import ../patroni/collections
 import ../patroni/postgresql/bootstrap
 
