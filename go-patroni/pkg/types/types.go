@@ -180,10 +180,11 @@ type Leader struct {
 
 // SyncState represents synchronous replication state.
 type SyncState struct {
-	Version int64  `json:"version"`
-	Leader  string `json:"leader,omitempty"`
-	Sync    string `json:"sync,omitempty"`
-	Quorum  int    `json:"quorum,omitempty"`
+	Version     int64    `json:"version"`
+	Leader      string   `json:"leader,omitempty"`
+	Sync        string   `json:"sync,omitempty"`
+	SyncStandby []string `json:"sync_standby,omitempty"`
+	Quorum      int      `json:"quorum,omitempty"`
 }
 
 // Failover represents a scheduled failover operation.

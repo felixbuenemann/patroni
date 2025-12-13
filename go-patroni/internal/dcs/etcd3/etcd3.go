@@ -327,7 +327,7 @@ func (e *Etcd3) AttemptToAcquireOrRenewLock(ctx context.Context) (bool, error) {
 
 		if existingLeader == e.Config.Name && existingLease == int64(leaseID) {
 			// We already hold the lock, just refresh it
-			_, _, err := e.lease.KeepAliveOnce(ctx, leaseID)
+			_, err := e.lease.KeepAliveOnce(ctx, leaseID)
 			if err != nil {
 				return false, fmt.Errorf("failed to refresh lease: %w", err)
 			}

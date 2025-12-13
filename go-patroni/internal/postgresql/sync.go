@@ -43,13 +43,13 @@ func DefaultSyncConfig() *SyncConfig {
 
 // SyncReplication manages synchronous replication settings.
 type SyncReplication struct {
-	pg           *PostgreSQL
+	pg           *Postgresql
 	config       *SyncConfig
 	currentSync  *types.SyncState
 }
 
 // NewSyncReplication creates a new SyncReplication manager.
-func NewSyncReplication(pg *PostgreSQL, config *SyncConfig) *SyncReplication {
+func NewSyncReplication(pg *Postgresql, config *SyncConfig) *SyncReplication {
 	if config == nil {
 		config = DefaultSyncConfig()
 	}
@@ -134,12 +134,12 @@ func (s *SyncReplication) getEligibleStandbys(cluster *types.Cluster) []eligible
 		}
 
 		// Skip members with nosync tag
-		if member.Data.Tags != nil && member.Data.Tags.NoSync {
+		if member.Data.Tags.NoSync {
 			continue
 		}
 
 		// Skip members with nofailover tag (they can't become primary anyway)
-		if member.Data.Tags != nil && member.Data.Tags.NoFailover {
+		if member.Data.Tags.NoFailover {
 			continue
 		}
 
@@ -158,7 +158,7 @@ func (s *SyncReplication) getEligibleStandbys(cluster *types.Cluster) []eligible
 
 		// Determine priority
 		priority := 1
-		if member.Data.Tags != nil && member.Data.Tags.FailoverPriority > 0 {
+		if member.Data.Tags.FailoverPriority > 0 {
 			priority = member.Data.Tags.FailoverPriority
 		}
 

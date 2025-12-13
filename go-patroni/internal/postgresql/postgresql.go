@@ -3,7 +3,6 @@ package postgresql
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -718,4 +717,75 @@ func (pg *Postgresql) TimelineWALPosition() (int, int64) {
 	}
 
 	return info.Timeline, walPos
+}
+
+// GetVersion returns the PostgreSQL major version as an integer.
+func (pg *Postgresql) GetVersion() int {
+	pg.mu.RLock()
+	defer pg.mu.RUnlock()
+	return pg.majorVersion
+}
+
+// GetControlData returns the pg_controldata output as a map.
+func (pg *Postgresql) GetControlData() (map[string]string, error) {
+	return pg.controldata(), nil
+}
+
+// SupportsTimelines returns true if this PostgreSQL version supports timelines.
+func (pg *Postgresql) SupportsTimelines() bool {
+	// Timelines are supported in PostgreSQL 9.3+
+	return pg.majorVersion >= 90300
+}
+
+// GetParameter retrieves a PostgreSQL parameter value.
+func (pg *Postgresql) GetParameter(ctx context.Context, name string) (string, error) {
+	pg.mu.RLock()
+	pool := pg.pool
+	pg.mu.RUnlock()
+
+	if pool == nil {
+		return "", fmt.Errorf("not connected")
+	}
+
+	var value string
+	err := pool.QueryRow(ctx, "SHOW "+name).Scan(&value)
+	if err != nil {
+		return "", fmt.Errorf("failed to get parameter %s: %w", name, err)
+	}
+
+	return value, nil
+}
+
+// SetParameter sets a PostgreSQL parameter value (requires reload).
+func (pg *Postgresql) SetParameter(ctx context.Context, name, value string) error {
+	pg.mu.RLock()
+	pool := pg.pool
+	pg.mu.RUnlock()
+
+	if pool == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER SYSTEM SET %s = %s", name, quoteValue(value)))
+	if err != nil {
+		return fmt.Errorf("failed to set parameter %s: %w", name, err)
+	}
+
+	// Reload configuration
+	_, err = pool.Exec(ctx, "SELECT pg_reload_conf()")
+	if err != nil {
+		return fmt.Errorf("failed to reload configuration: %w", err)
+	}
+
+	return nil
+}
+
+// quoteValue quotes a PostgreSQL value for ALTER SYSTEM.
+func quoteValue(value string) string {
+	if value == "" {
+		return "''"
+	}
+	// Escape single quotes
+	escaped := strings.ReplaceAll(value, "'", "''")
+	return "'" + escaped + "'"
 }

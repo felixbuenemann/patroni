@@ -34,7 +34,7 @@ const (
 
 // Rewind manages pg_rewind operations for recovering a former primary.
 type Rewind struct {
-	pg       *PostgreSQL
+	pg       *Postgresql
 	config   *RewindConfig
 	state    RewindState
 	lastErr  error
@@ -42,7 +42,7 @@ type Rewind struct {
 }
 
 // NewRewind creates a new Rewind manager.
-func NewRewind(pg *PostgreSQL, config *RewindConfig) *Rewind {
+func NewRewind(pg *Postgresql, config *RewindConfig) *Rewind {
 	if config == nil {
 		config = &RewindConfig{
 			UsePgRewind: true,
@@ -317,7 +317,8 @@ func (r *Rewind) CheckTimelines(ctx context.Context, primaryHost string, primary
 	localLSN := localControlData["Latest checkpoint's REDO location"]
 
 	// Query primary for its timeline
-	connStr := fmt.Sprintf("host=%s port=%d user=%s dbname=postgres",
+	// connStr would be used to connect to primary via pgx
+	_ = fmt.Sprintf("host=%s port=%d user=%s dbname=postgres",
 		primaryHost, primaryPort, r.config.Username)
 
 	// This would typically use pgx to connect and query

@@ -129,7 +129,7 @@ func (ha *HA) runCycle(ctx context.Context) {
 	// Handle cluster state
 	action := ha.determineAction(ctx)
 	if err := ha.executeAction(ctx, action); err != nil {
-		log.Error().Err(err).Str("action", action).Msg("Failed to execute action")
+		log.Error().Err(err).Str("action", string(action)).Msg("Failed to execute action")
 	}
 
 	ha.lastLoopTime = time.Now()
