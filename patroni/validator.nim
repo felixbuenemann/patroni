@@ -109,10 +109,9 @@ proc splitHostPort*(address: string, defaultPort: int = 0): tuple[host: string, 
   else:
     result.host = address[0..<lastColon]
     let portStr = address[lastColon + 1..^1]
-    let p = parseInt(portStr)
-    if p.isSome:
-      result.port = p.get()
-    else:
+    try:
+      result.port = strutils.parseInt(portStr)
+    except ValueError:
       result.port = defaultPort
 
 proc validateConnectAddress*(address: string): bool =
@@ -209,10 +208,10 @@ method validate*(v: IntValidator, value: JsonNode): bool =
   of JInt:
     intVal = value.getInt()
   of JString:
-    let parsed = parseInt(value.getStr())
-    if parsed.isNone:
+    try:
+      intVal = strutils.parseInt(value.getStr())
+    except ValueError:
       return false
-    intVal = parsed.get()
   else:
     return false
 
