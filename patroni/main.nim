@@ -4,6 +4,7 @@
 
 import std/[os, json, tables, parseopt, times, locks, options]
 import ./version
+import ./config
 import ./exceptions
 import ./global_config
 import ./tags
@@ -278,16 +279,20 @@ tags:
   echo "Starting Patroni ", version.patroniVersion
   echo "Configuration file: ", configFile
 
+  # Load configuration from file
+  var patroniConfig: Config
+  try:
+    patroniConfig = newConfig(configFile)
+  except ConfigParseError as e:
+    echo "Error: ", e.msg
+    quit(1)
+
   if validateOnly:
-    echo "Configuration validation not yet implemented in Nim port"
+    echo "Configuration is valid"
     quit(0)
 
-  # TODO: Load configuration from YAML file
-  # For now, use empty config
-  var config = initTable[string, JsonNode]()
-
-  # Create Patroni instance
-  let patroni = newPatroni(config)
+  # Create Patroni instance with loaded configuration
+  let patroni = newPatroni(patroniConfig.localConfiguration)
 
   # Run main loop
   try:
