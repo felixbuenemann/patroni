@@ -4,7 +4,7 @@
 ## architecture. This module provides abstract interfaces for MPP cluster
 ## management.
 
-import std/[json, re, strformat, strutils, tables]
+import std/[json, options, re, strformat, strutils, tables]
 import ../dcs
 import ../exceptions
 import ../log
@@ -14,12 +14,12 @@ let logger = getLogger("patroni.postgresql.mpp")
 type
   AbstractMPP* = ref object of RootObj
     ## Abstract class for MPP configuration.
-    config: Table[string, JsonNode]
+    config*: Table[string, JsonNode]
     groupRe*: Regex
 
   AbstractMPPHandler* = ref object of AbstractMPP
     ## Abstract class for MPP event handling.
-    postgresql: pointer  # Postgresql - forward declaration
+    postgresql*: pointer  # Postgresql - forward declaration
 
   NullMPP* = ref object of AbstractMPP
     ## Null implementation of MPP (disabled).
@@ -95,14 +95,14 @@ proc newAbstractMPPHandler*(postgresql: pointer, config: Table[string, JsonNode]
   result.groupRe = re"^\d+$"
   result.postgresql = postgresql
 
-method handleEvent*(self: AbstractMPPHandler, cluster: Cluster, event: JsonNode) {.base.} =
+method handleEvent*(self: AbstractMPPHandler, cluster: dcs.Cluster, event: JsonNode) {.base.} =
   ## Handle an event sent from a worker node.
   ##
   ## :param cluster: Current cluster state from DCS.
   ## :param event: Event to handle.
   discard
 
-method syncMetaData*(self: AbstractMPPHandler, cluster: Cluster) {.base.} =
+method syncMetaData*(self: AbstractMPPHandler, cluster: dcs.Cluster) {.base.} =
   ## Sync metadata on the coordinator.
   ##
   ## :param cluster: Current cluster state from DCS.
@@ -160,11 +160,11 @@ proc newNullMPPHandler*(postgresql: pointer, config: Table[string, JsonNode]): N
   result.groupRe = re"^\d+$"
   result.postgresql = postgresql
 
-method handleEvent*(self: NullMPPHandler, cluster: Cluster, event: JsonNode) =
+method handleEvent*(self: NullMPPHandler, cluster: dcs.Cluster, event: JsonNode) =
   ## Handle event (no-op for Null).
   discard
 
-method syncMetaData*(self: NullMPPHandler, cluster: Cluster) =
+method syncMetaData*(self: NullMPPHandler, cluster: dcs.Cluster) =
   ## Sync metadata (no-op for Null).
   discard
 

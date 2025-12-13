@@ -3,7 +3,7 @@
 ## This module implements the Citus distributed PostgreSQL extension handler,
 ## managing pg_dist_node metadata and worker coordination.
 
-import std/[hashes, json, locks, logging, options, re, sequtils, sets, strformat, strutils, tables, times, uri]
+import std/[hashes, json, locks, options, re, sequtils, sets, strformat, strutils, tables, times, uri]
 import ../../dcs
 import ../../psycopg
 import ../../utils
@@ -17,7 +17,15 @@ let logger = getLogger("patroni.postgresql.mpp.citus")
 
 const
   CITUS_COORDINATOR_GROUP_ID* = 0
-  CITUS_SLOT_NAME_RE = re"^citus_shard_(move|split)_slot(_[1-9][0-9]*){2,3}$"
+  CITUS_SLOT_NAME_PATTERN* = "^citus_shard_(move|split)_slot(_[1-9][0-9]*){2,3}$"
+
+var citusSlotNameRe: Regex
+
+proc getCitusSlotNameRe(): Regex =
+  ## Get the Citus slot name regex (lazy initialization).
+  if citusSlotNameRe.isNil:
+    citusSlotNameRe = re(CITUS_SLOT_NAME_PATTERN)
+  result = citusSlotNameRe
 
 type
   PgDistNode* = ref object
@@ -29,7 +37,7 @@ type
     role*: string
     nodeid*: Option[int]
 
-  PgDistGroup* = ref object
+  PgDistGroup* = ref object of RootObj
     ## A set-like object that represents a Citus group in "pg_dist_node" table.
     failover*: bool
     groupid*: int
@@ -47,19 +55,18 @@ type
 
   Citus* = ref object of AbstractMPP
     ## Citus MPP configuration.
-    groupRe: Regex
 
   CitusHandler* = ref object of AbstractMPPHandler
     ## Define the interfaces for handling an underlying Citus cluster.
-    citusMpp: Citus
-    connection: Connection
-    pgDistGroup: Table[int, PgDistTask]
-    tasks: seq[PgDistTask]
-    inFlight: PgDistTask
-    scheduleLoadPgDistGroup: bool
-    condition: Cond
-    condLock: Lock
-    running: bool
+    citusMpp*: Citus
+    connection*: Connection
+    pgDistGroup*: Table[int, PgDistTask]
+    tasks*: seq[PgDistTask]
+    inFlight*: PgDistTask
+    scheduleLoadPgDistGroup*: bool
+    condition*: Cond
+    condLock*: Lock
+    running*: bool
 
 # PgDistNode implementation
 
@@ -128,9 +135,10 @@ proc len*(self: PgDistGroup): int =
   ## Get number of nodes.
   self.nodes.len
 
-proc items*(self: PgDistGroup): auto =
+iterator items*(self: PgDistGroup): PgDistNode =
   ## Iterate over nodes.
-  self.nodes.items
+  for item in self.nodes:
+    yield item
 
 proc `-`*(a, b: PgDistGroup): HashSet[PgDistNode] =
   ## Set difference.
@@ -270,10 +278,10 @@ method onDemote*(self: CitusHandler) =
 proc query*(self: CitusHandler, sql: string, params: varargs[string]): seq[seq[string]] =
   ## Execute a query.
   try:
-    logger.log(lvlDebug, fmt"query({sql}, {params})")
+    logger.log(LogLevel.Debug, fmt"query({sql}, {params})")
     return self.connection.query(sql, @params)
   except PostgresError as e:
-    logger.log(lvlError, fmt"Exception when executing query '{sql}': {e.msg}")
+    logger.log(LogLevel.Error, fmt"Exception when executing query '{sql}': {e.msg}")
     self.connection.close()
     acquire(self.condLock)
     self.inFlight = nil
@@ -307,7 +315,7 @@ proc loadPgDistGroup*(self: CitusHandler): bool =
   except:
     return false
 
-method syncMetaData*(self: CitusHandler, cluster: Cluster) =
+method syncMetaData*(self: CitusHandler, cluster: dcs.Cluster) =
   ## Maintain pg_dist_node from the coordinator leader.
   if not self.citusMpp.isCoordinator():
     return
@@ -333,7 +341,7 @@ method ignoreReplicationSlot*(self: CitusHandler, slot: Table[string, string]): 
   ## Check if a replication slot should be ignored.
   if slot.getOrDefault("type") == "logical":
     let slotName = slot.getOrDefault("name", "")
-    if slotName.match(CITUS_SLOT_NAME_RE):
+    if slotName.match(getCitusSlotNameRe()):
       return true
   return false
 

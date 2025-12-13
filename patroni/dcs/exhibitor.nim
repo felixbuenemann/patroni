@@ -6,7 +6,7 @@ import std/[algorithm, httpclient, json, random, sequtils, strformat, strutils, 
 import ../log
 import ../request
 import ../utils
-import ./base
+import ../dcs as base
 import ./zookeeper
 
 export base, zookeeper

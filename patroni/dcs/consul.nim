@@ -8,7 +8,7 @@ import ../exceptions
 import ../log
 import ../request
 import ../utils
-import ./base
+import ../dcs as base
 
 export base
 

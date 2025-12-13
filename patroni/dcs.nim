@@ -87,8 +87,9 @@ type
     failover*: Failover
     sync*: SyncState
     history*: TimelineHistory
-    failsafe*: Table[string, string]
+    failsafe*: JsonNode
     workers*: Table[int, seq[Member]]
+    initialize*: string
 
   AbstractDCS* = ref object of RootObj
     ## Abstract base class for DCS implementations
@@ -332,7 +333,7 @@ proc newCluster*(): Cluster =
   result.failover = nil
   result.sync = nil
   result.history = nil
-  result.failsafe = initTable[string, string]()
+  result.failsafe = nil
   result.workers = initTable[int, seq[Member]]()
 
 proc hasLeader*(self: Cluster): bool =

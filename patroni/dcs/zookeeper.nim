@@ -6,7 +6,7 @@ import std/[json, locks, net, options, os, sequtils, strformat, strutils, tables
 import ../exceptions
 import ../log
 import ../utils
-import ./base
+import ../dcs as base
 
 export base
 

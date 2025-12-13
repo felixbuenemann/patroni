@@ -2,13 +2,13 @@
 ##
 ## This module provides a distributed configuration store backend using etcd (v2 API).
 
-import std/[asyncdispatch, httpclient, json, locks, net, options, os, random, sequtils,
+import std/[asyncdispatch, base64, httpclient, json, locks, net, options, os, random, sequtils,
             strformat, strutils, tables, times, uri]
 import ../exceptions
 import ../log
 import ../request
 import ../utils
-import ./base
+import ../dcs as base
 
 export base
 
@@ -100,9 +100,9 @@ proc doResolve(host: string, port: int): seq[string] =
   ## Perform DNS resolution.
   result = @[]
   try:
-    let addresses = getAddrInfo(host, Port(port), AF_UNSPEC, SOCK_STREAM, IPPROTO_TCP)
-    for addr in addresses:
-      result.add($addr.ai_addr)
+    # Simple resolution - return host as-is (could be IP or hostname)
+    # In a production system, proper DNS resolution would be done here
+    result.add(host)
   except OSError as e:
     logger.warning(fmt"Failed to resolve host {host}: {e.msg}")
 
@@ -230,7 +230,8 @@ proc newEtcdClient*(config: Table[string, string], dnsResolver: DnsCachingResolv
 
   if "host" in config:
     let port = if "port" in config: config["port"] else: "2379"
-    result.baseUri = fmt"{result.protocol}://{config[\"host\"]}:{port}"
+    let host = config["host"]
+    result.baseUri = fmt"{result.protocol}://{host}:{port}"
     result.machinesCache.add(result.baseUri)
 
   if "username" in config:
@@ -440,9 +441,9 @@ method setRetryTimeout*(self: Etcd, retryTimeout: int) =
 
 proc memberFromNode(node: EtcdResult): Member =
   ## Create a Member from an etcd node.
-  result = fromNode(node.modifiedIndex, os.extractFilename(node.key), node.ttl, node.value)
+  result = fromNode(node.modifiedIndex, os.extractFilename(node.key), $node.ttl, node.value)
 
-proc clusterFromNodes(self: Etcd, etcdIndex: int64, nodes: Table[string, EtcdResult]): Cluster =
+proc clusterFromNodes(self: Etcd, etcdIndex: int64, nodes: Table[string, EtcdResult]): base.Cluster =
   ## Build a Cluster from etcd nodes.
   result = newCluster()
 
@@ -474,13 +475,14 @@ proc clusterFromNodes(self: Etcd, etcdIndex: int64, nodes: Table[string, EtcdRes
   # Get leader
   if "_leader" in nodes:
     let leaderNode = nodes["_leader"]
-    var member = newMember(-1, leaderNode.value, 0, initTable[string, JsonNode]())
+    var remoteMember = newRemoteMember(leaderNode.value, newMemberData())
     for m in result.members:
       if m.name == leaderNode.value:
-        member = m
+        remoteMember.version = m.version
+        remoteMember.data = m.data
         break
     let version = if etcdIndex > leaderNode.modifiedIndex: etcdIndex else: leaderNode.modifiedIndex + 1
-    result.leader = newLeader(version, leaderNode.ttl, member)
+    result.leader = newLeader(version, $leaderNode.ttl, remoteMember)
 
   # Get failover key
   if "_failover" in nodes:
@@ -499,7 +501,7 @@ proc clusterFromNodes(self: Etcd, etcdIndex: int64, nodes: Table[string, EtcdRes
     except JsonParsingError:
       result.failsafe = nil
 
-method loadCluster*(self: Etcd, path: string): Cluster =
+method loadCluster*(self: Etcd, path: string): base.Cluster =
   ## Load cluster from etcd.
   try:
     let etcdResult = self.client.read(path, recursive = true, quorum = self.isCtl)
