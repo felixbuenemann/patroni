@@ -97,7 +97,7 @@ func (c *Consul) createSession(ctx context.Context) error {
 	}
 
 	sessionEntry := &api.SessionEntry{
-		Name:      fmt.Sprintf("patroni-%s-%s", c.Scope, c.Name),
+		Name:      fmt.Sprintf("patroni-%s-%s", c.Scope, c.Name()),
 		TTL:       ttl.String(),
 		Behavior:  api.SessionBehaviorDelete,
 		LockDelay: 0,
