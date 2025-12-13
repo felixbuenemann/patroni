@@ -50,9 +50,11 @@ type HA struct {
 	stopCh   chan struct{}
 
 	// State tracking
-	isLeader       bool
-	leaderTimeline int
-	lastLoopTime   time.Time
+	isLeader         bool
+	leaderTimeline   int
+	lastLoopTime     time.Time
+	busy             bool
+	scheduledRestart *ScheduledRestart
 
 	// Failsafe state
 	failsafe *Failsafe
@@ -623,4 +625,152 @@ func (ha *HA) IsPaused() bool {
 	ha.mu.RLock()
 	defer ha.mu.RUnlock()
 	return ha.state == HAStatePaused
+}
+
+// ScheduledRestart represents a scheduled restart.
+type ScheduledRestart struct {
+	Schedule            time.Time `json:"schedule"`
+	PostmasterStartTime time.Time `json:"postmaster_start_time,omitempty"`
+	Pending             bool      `json:"pending"`
+}
+
+// ScheduleRestart schedules a restart at the specified time.
+func (ha *HA) ScheduleRestart(schedule time.Time, postmasterStartTime time.Time) error {
+	ha.mu.Lock()
+	defer ha.mu.Unlock()
+
+	ha.scheduledRestart = &ScheduledRestart{
+		Schedule:            schedule,
+		PostmasterStartTime: postmasterStartTime,
+		Pending:             true,
+	}
+
+	log.Info().Time("schedule", schedule).Msg("Restart scheduled")
+	return nil
+}
+
+// CancelScheduledRestart cancels any scheduled restart.
+func (ha *HA) CancelScheduledRestart() error {
+	ha.mu.Lock()
+	defer ha.mu.Unlock()
+
+	if ha.scheduledRestart != nil {
+		ha.scheduledRestart = nil
+		log.Info().Msg("Scheduled restart cancelled")
+	}
+	return nil
+}
+
+// GetScheduledRestart returns the scheduled restart info.
+func (ha *HA) GetScheduledRestart() *ScheduledRestart {
+	ha.mu.RLock()
+	defer ha.mu.RUnlock()
+	return ha.scheduledRestart
+}
+
+// IsBusy returns true if the HA is busy with an operation.
+func (ha *HA) IsBusy() bool {
+	ha.mu.RLock()
+	defer ha.mu.RUnlock()
+	return ha.busy
+}
+
+// Reinitialize triggers a reinitialize of this member.
+func (ha *HA) Reinitialize(ctx context.Context, force bool) error {
+	ha.mu.Lock()
+	ha.busy = true
+	ha.mu.Unlock()
+
+	defer func() {
+		ha.mu.Lock()
+		ha.busy = false
+		ha.mu.Unlock()
+	}()
+
+	log.Info().Bool("force", force).Msg("Reinitializing member")
+
+	// Stop PostgreSQL
+	if err := ha.pg.Stop(ctx, postgresql.StopModeFast); err != nil {
+		log.Warn().Err(err).Msg("Error stopping PostgreSQL during reinitialize")
+	}
+
+	// Get leader for cloning
+	cluster, err := ha.dcs.GetCluster(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster: %w", err)
+	}
+
+	leader := cluster.GetLeaderMember()
+	if leader == nil {
+		return fmt.Errorf("no leader available for reinitialize")
+	}
+
+	// Clone from leader
+	primaryConnInfo := ha.buildPrimaryConnInfo(leader)
+	if err := ha.pg.Clone(ctx, primaryConnInfo); err != nil {
+		return fmt.Errorf("failed to clone: %w", err)
+	}
+
+	// Start PostgreSQL
+	if err := ha.pg.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start PostgreSQL: %w", err)
+	}
+
+	log.Info().Msg("Reinitialize completed")
+	return nil
+}
+
+// ManualFailover triggers a manual failover.
+func (ha *HA) ManualFailover(ctx context.Context, leader, candidate string, scheduledAt *time.Time) error {
+	log.Info().
+		Str("leader", leader).
+		Str("candidate", candidate).
+		Msg("Manual failover requested")
+
+	failover := &types.Failover{
+		Leader:    leader,
+		Candidate: candidate,
+	}
+
+	if scheduledAt != nil {
+		failover.ScheduledAt = *scheduledAt
+	}
+
+	if err := ha.dcs.SetFailoverValue(ctx, failover); err != nil {
+		return fmt.Errorf("failed to set failover: %w", err)
+	}
+
+	// Wake up HA loop to process the failover
+	ha.Wakeup()
+	return nil
+}
+
+// CancelFailover cancels a pending failover.
+func (ha *HA) CancelFailover(ctx context.Context) error {
+	log.Info().Msg("Cancelling failover")
+	return ha.dcs.DeleteFailover(ctx)
+}
+
+// SetConfig sets the cluster configuration.
+func (ha *HA) SetConfig(ctx context.Context, cfg map[string]interface{}) error {
+	log.Info().Msg("Updating cluster configuration")
+
+	if err := ha.dcs.SetConfigValue(ctx, cfg); err != nil {
+		return fmt.Errorf("failed to set config: %w", err)
+	}
+
+	// Wake up HA loop to reload configuration
+	ha.Wakeup()
+	return nil
+}
+
+// GetConfig returns the current cluster configuration.
+func (ha *HA) GetConfig() map[string]interface{} {
+	ha.mu.RLock()
+	defer ha.mu.RUnlock()
+
+	if ha.cluster != nil && ha.cluster.Config != nil {
+		return ha.cluster.Config.Data
+	}
+	return nil
 }

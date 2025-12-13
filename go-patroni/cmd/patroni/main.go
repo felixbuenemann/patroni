@@ -98,11 +98,11 @@ func run(cmd *cobra.Command, args []string) error {
 	haInstance := ha.New(cfg, dcsClient, pg)
 
 	// Initialize REST API server
-	apiServer := api.New(cfg, haInstance, pg)
+	apiServer := api.NewServer(haInstance, pg, &cfg.RestAPI)
 	if err := apiServer.Start(); err != nil {
 		log.Fatal().Err(err).Msg("Failed to start API server")
 	}
-	defer apiServer.Stop(ctx)
+	defer apiServer.Stop()
 
 	// Start HA loop in background
 	errCh := make(chan error, 1)
@@ -159,14 +159,14 @@ func shutdown(ctx context.Context, haInstance *ha.HA, pg *postgresql.Postgresql,
 	log.Info().Msg("Initiating graceful shutdown")
 
 	// Create shutdown context with timeout
-	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	_, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// Stop HA loop
 	haInstance.Stop()
 
 	// Stop API server
-	if err := apiServer.Stop(shutdownCtx); err != nil {
+	if err := apiServer.Stop(); err != nil {
 		log.Warn().Err(err).Msg("Error stopping API server")
 	}
 
