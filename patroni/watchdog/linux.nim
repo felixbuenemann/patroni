@@ -1,246 +1,282 @@
-# pyright: reportConstantRedefinition=false
-import ctypes
-import os
-import platform
+## Linux hardware watchdog support.
+##
+## This module provides types and procedures for interacting with
+## Linux hardware watchdog devices via ioctl.
 
-from typing import Any, Dict, NamedTuple
+import std/[json, os, posix, strformat, tables]
+import ./base
 
-from .base import WatchdogBase, WatchdogError
+export base
 
-# Pythonification of linux/ioctl.h
-IOC_NONE = 0
-IOC_WRITE = 1
-IOC_READ = 2
+# Linux ioctl definitions
+const
+  IOC_NONE = 0
+  IOC_WRITE = 1
+  IOC_READ = 2
 
-IOC_NRBITS = 8
-IOC_TYPEBITS = 8
-IOC_SIZEBITS = 14
-IOC_DIRBITS = 2
+  IOC_NRBITS = 8
+  IOC_TYPEBITS = 8
+  IOC_SIZEBITS = 14
+  IOC_DIRBITS = 2
 
-# Non-generic platform special cases
-machine = platform.machine()
-if machine in ['mips', 'sparc', 'powerpc', 'ppc64', 'ppc64le']:  # pragma: no cover
-    IOC_SIZEBITS = 13
-    IOC_DIRBITS = 3
-    IOC_NONE, IOC_WRITE = 1, 4
-elif machine == 'parisc':  # pragma: no cover
-    IOC_WRITE, IOC_READ = 2, 1
+  IOC_NRSHIFT = 0
+  IOC_TYPESHIFT = IOC_NRSHIFT + IOC_NRBITS
+  IOC_SIZESHIFT = IOC_TYPESHIFT + IOC_TYPEBITS
+  IOC_DIRSHIFT = IOC_SIZESHIFT + IOC_SIZEBITS
 
-IOC_NRSHIFT = 0
-IOC_TYPESHIFT = IOC_NRSHIFT + IOC_NRBITS
-IOC_SIZESHIFT = IOC_TYPESHIFT + IOC_TYPEBITS
-IOC_DIRSHIFT = IOC_SIZESHIFT + IOC_SIZEBITS
+  WATCHDOG_IOCTL_BASE = 'W'.ord
 
+  INT_SIZE = 4
+  WATCHDOG_INFO_SIZE = 40
 
-def IOW(type_: str, nr: int, size: int) -> int:
-    return IOC(IOC_WRITE, type_, nr, size)
+proc IOC(dir: int, typeChar: int, nr: int, size: int): culong =
+  ## Calculate ioctl request number.
+  result = culong(
+    (dir shl IOC_DIRSHIFT) or
+    (typeChar shl IOC_TYPESHIFT) or
+    (nr shl IOC_NRSHIFT) or
+    (size shl IOC_SIZESHIFT)
+  )
 
+proc IOR(typeChar: char, nr: int, size: int): culong =
+  IOC(IOC_READ, typeChar.ord, nr, size)
 
-def IOR(type_: str, nr: int, size: int) -> int:
-    return IOC(IOC_READ, type_, nr, size)
+proc IOW(typeChar: char, nr: int, size: int): culong =
+  IOC(IOC_WRITE, typeChar.ord, nr, size)
 
+proc IOWR(typeChar: char, nr: int, size: int): culong =
+  IOC(IOC_READ or IOC_WRITE, typeChar.ord, nr, size)
 
-def IOWR(type_: str, nr: int, size: int) -> int:
-    return IOC(IOC_READ | IOC_WRITE, type_, nr, size)
+# Watchdog ioctl commands
+let
+  WDIOC_GETSUPPORT = IOR('W', 0, WATCHDOG_INFO_SIZE)
+  WDIOC_GETSTATUS = IOR('W', 1, INT_SIZE)
+  WDIOC_GETBOOTSTATUS = IOR('W', 2, INT_SIZE)
+  WDIOC_GETTEMP = IOR('W', 3, INT_SIZE)
+  WDIOC_SETOPTIONS = IOR('W', 4, INT_SIZE)
+  WDIOC_KEEPALIVE = IOR('W', 5, INT_SIZE)
+  WDIOC_SETTIMEOUT = IOWR('W', 6, INT_SIZE)
+  WDIOC_GETTIMEOUT = IOR('W', 7, INT_SIZE)
+  WDIOC_SETPRETIMEOUT = IOWR('W', 8, INT_SIZE)
+  WDIOC_GETPRETIMEOUT = IOR('W', 9, INT_SIZE)
+  WDIOC_GETTIMELEFT = IOR('W', 10, INT_SIZE)
 
+# Watchdog options flags
+const
+  WDIOF_OVERHEAT = 0x0001
+  WDIOF_FANFAULT = 0x0002
+  WDIOF_EXTERN1 = 0x0004
+  WDIOF_EXTERN2 = 0x0008
+  WDIOF_POWERUNDER = 0x0010
+  WDIOF_CARDRESET = 0x0020
+  WDIOF_POWEROVER = 0x0040
+  WDIOF_SETTIMEOUT* = 0x0080
+  WDIOF_MAGICCLOSE* = 0x0100
+  WDIOF_PRETIMEOUT = 0x0200
+  WDIOF_ALARMONLY = 0x0400
+  WDIOF_KEEPALIVEPING = 0x8000
 
-def IOC(dir_: int, type_: str, nr: int, size: int) -> int:
-    return (dir_ << IOC_DIRSHIFT) \
-        | (ord(type_) << IOC_TYPESHIFT) \
-        | (nr << IOC_NRSHIFT) \
-        | (size << IOC_SIZESHIFT)
+  WDIOS_DISABLECARD = 0x0001
+  WDIOS_ENABLECARD = 0x0002
+  WDIOS_TEMPPANIC = 0x0004
 
+type
+  WatchdogInfo* = object
+    ## Watchdog device information.
+    options*: uint32
+    firmwareVersion*: uint32
+    identity*: string
 
-# Pythonification of linux/watchdog.h
+  LinuxWatchdogDevice* = ref object of WatchdogBase
+    ## Linux hardware watchdog device.
+    device: string
+    fd: cint
+    supportCache: Option[WatchdogInfo]
 
-WATCHDOG_IOCTL_BASE = 'W'
+const
+  DEFAULT_DEVICE* = "/dev/watchdog"
 
+proc hasSettimeout*(self: WatchdogInfo): bool =
+  ## Check if device supports setting timeout.
+  result = (self.options and WDIOF_SETTIMEOUT) != 0
 
-class watchdog_info(ctypes.Structure):
-    _fields_ = [
-        ('options', ctypes.c_uint32),           # Options the card/driver supports
-        ('firmware_version', ctypes.c_uint32),  # Firmware version of the card
-        ('identity', ctypes.c_uint8 * 32),      # Identity of the board
-    ]
+proc hasMagicclose*(self: WatchdogInfo): bool =
+  ## Check if device supports magic close.
+  result = (self.options and WDIOF_MAGICCLOSE) != 0
 
+proc hasPretimeout*(self: WatchdogInfo): bool =
+  ## Check if device supports pretimeout.
+  result = (self.options and WDIOF_PRETIMEOUT) != 0
 
-struct_watchdog_info_size = ctypes.sizeof(watchdog_info)
-int_size = ctypes.sizeof(ctypes.c_int)
+proc newLinuxWatchdogDevice*(device: string = DEFAULT_DEVICE): LinuxWatchdogDevice =
+  ## Create a new Linux watchdog device.
+  new(result)
+  result.device = device
+  result.fd = -1
+  result.supportCache = none(WatchdogInfo)
 
-WDIOC_GETSUPPORT = IOR(WATCHDOG_IOCTL_BASE, 0, struct_watchdog_info_size)
-WDIOC_GETSTATUS = IOR(WATCHDOG_IOCTL_BASE, 1, int_size)
-WDIOC_GETBOOTSTATUS = IOR(WATCHDOG_IOCTL_BASE, 2, int_size)
-WDIOC_GETTEMP = IOR(WATCHDOG_IOCTL_BASE, 3, int_size)
-WDIOC_SETOPTIONS = IOR(WATCHDOG_IOCTL_BASE, 4, int_size)
-WDIOC_KEEPALIVE = IOR(WATCHDOG_IOCTL_BASE, 5, int_size)
-WDIOC_SETTIMEOUT = IOWR(WATCHDOG_IOCTL_BASE, 6, int_size)
-WDIOC_GETTIMEOUT = IOR(WATCHDOG_IOCTL_BASE, 7, int_size)
-WDIOC_SETPRETIMEOUT = IOWR(WATCHDOG_IOCTL_BASE, 8, int_size)
-WDIOC_GETPRETIMEOUT = IOR(WATCHDOG_IOCTL_BASE, 9, int_size)
-WDIOC_GETTIMELEFT = IOR(WATCHDOG_IOCTL_BASE, 10, int_size)
+proc fromConfig*(config: JsonNode): LinuxWatchdogDevice =
+  ## Create a watchdog device from configuration.
+  let device = config.getOrDefault("device").getStr(DEFAULT_DEVICE)
+  result = newLinuxWatchdogDevice(device)
 
+proc isRunning*(self: LinuxWatchdogDevice): bool =
+  ## Check if watchdog is running.
+  result = self.fd >= 0
 
-WDIOF_UNKNOWN = -1  # Unknown flag error
-WDIOS_UNKNOWN = -1  # Unknown status error
+proc isHealthy*(self: LinuxWatchdogDevice): bool =
+  ## Check if watchdog device is healthy.
+  result = fileExists(self.device) and access(self.device.cstring, W_OK) == 0
 
-WDIOF = {
-    "OVERHEAT": 0x0001,       # Reset due to CPU overheat
-    "FANFAULT": 0x0002,       # Fan failed
-    "EXTERN1": 0x0004,        # External relay 1
-    "EXTERN2": 0x0008,        # External relay 2
-    "POWERUNDER": 0x0010,     # Power bad/power fault
-    "CARDRESET": 0x0020,      # Card previously reset the CPU
-    "POWEROVER": 0x0040,      # Power over voltage
-    "SETTIMEOUT": 0x0080,     # Set timeout (in seconds)
-    "MAGICCLOSE": 0x0100,     # Supports magic close char
-    "PRETIMEOUT": 0x0200,     # Pretimeout (in seconds), get/set
-    "ALARMONLY": 0x0400,      # Watchdog triggers a management or other external alarm not a reboot
-    "KEEPALIVEPING": 0x8000,  # Keep alive ping reply
-}
+proc doIoctl(self: LinuxWatchdogDevice, request: culong, arg: pointer): bool =
+  ## Perform ioctl on watchdog device.
+  if self.fd < 0:
+    raise newException(WatchdogError, "Watchdog device is closed")
 
-WDIOS = {
-    "DISABLECARD": 0x0001,    # Turn off the watchdog timer
-    "ENABLECARD": 0x0002,     # Turn on the watchdog timer
-    "TEMPPANIC": 0x0004,      # Kernel panic on temperature trip
-}
+  when defined(posix):
+    let ret = ioctl(self.fd, request, arg)
+    return ret == 0
+  else:
+    return false
 
-# Implementation
+proc open*(self: LinuxWatchdogDevice) =
+  ## Open the watchdog device.
+  when defined(posix):
+    let fd = posix.open(self.device.cstring, O_WRONLY)
+    if fd < 0:
+      raise newException(WatchdogError, fmt"Can't open watchdog device: {self.device}")
+    self.fd = fd
+  else:
+    raise newException(WatchdogError, "Watchdog not supported on this platform")
 
+proc close*(self: LinuxWatchdogDevice) =
+  ## Close the watchdog device.
+  if self.fd >= 0:
+    # Write magic close character 'V'
+    when defined(posix):
+      discard posix.write(self.fd, "V".cstring, 1)
+      discard posix.close(self.fd)
+    self.fd = -1
 
-class WatchdogInfo(NamedTuple):
-    """Watchdog descriptor from the kernel"""
-    options: int
-    version: int
-    identity: str
+proc getSupport*(self: LinuxWatchdogDevice): WatchdogInfo =
+  ## Get watchdog support information.
+  if self.supportCache.isSome:
+    return self.supportCache.get
 
-    def __getattr__(self, name: str) -> bool:
-        """Convenience has_XYZ attributes for checking WDIOF bits in options"""
-        if name.startswith('has_') and name[4:] in WDIOF:
-            return bool(self.options & WDIOF[name[4:]])
+  when defined(posix):
+    # watchdog_info structure: uint32 options, uint32 firmware_version, uint8[32] identity
+    var info: array[40, byte]
+    if not self.doIoctl(WDIOC_GETSUPPORT, addr info[0]):
+      raise newException(WatchdogError, "Could not get watchdog device information")
 
-        raise AttributeError("WatchdogInfo instance has no attribute '{0}'".format(name))
+    var options: uint32
+    copyMem(addr options, addr info[0], 4)
 
+    var firmwareVersion: uint32
+    copyMem(addr firmwareVersion, addr info[4], 4)
 
-class LinuxWatchdogDevice(WatchdogBase):
-    DEFAULT_DEVICE = '/dev/watchdog'
+    var identity = ""
+    for i in 8..<40:
+      if info[i] == 0:
+        break
+      identity.add(char(info[i]))
 
-    def __init__(self, device: str) -> None:
-        self.device = device
-        self._support_cache = None
-        self._fd = None
+    result.options = options
+    result.firmwareVersion = firmwareVersion
+    result.identity = identity
+    self.supportCache = some(result)
+  else:
+    raise newException(WatchdogError, "Not supported")
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'LinuxWatchdogDevice':
-        device = config.get('device', cls.DEFAULT_DEVICE)
-        return cls(device)
+proc canBeDisabled*(self: LinuxWatchdogDevice): bool =
+  ## Check if watchdog can be disabled.
+  result = self.getSupport().hasMagicclose
 
-    @property
-    def is_running(self) -> bool:
-        return self._fd is not None
+proc describe*(self: LinuxWatchdogDevice): string =
+  ## Describe the watchdog device.
+  var devStr = ""
+  if self.device != DEFAULT_DEVICE:
+    devStr = fmt" at {self.device}"
 
-    @property
-    def is_healthy(self) -> bool:
-        return os.path.exists(self.device) and os.access(self.device, os.W_OK)
+  var verStr = ""
+  var identity = "Linux watchdog device"
 
-    def open(self) -> None:
-        try:
-            self._fd = os.open(self.device, os.O_WRONLY)
-        except OSError as e:
-            raise WatchdogError("Can't open watchdog device: {0}".format(e))
+  if self.fd >= 0:
+    try:
+      let info = self.getSupport()
+      if info.firmwareVersion > 0:
+        verStr = fmt" (firmware {info.firmwareVersion})"
+      identity = info.identity
+    except WatchdogError:
+      discard
 
-    def close(self) -> None:
-        if self._fd is not None:  # self.is_running
-            try:
-                os.write(self._fd, b'V')
-                os.close(self._fd)
-                self._fd = None
-            except OSError as e:
-                raise WatchdogError("Error while closing {0}: {1}".format(self.describe(), e))
+  result = identity & verStr & devStr
 
-    @property
-    def can_be_disabled(self) -> bool:
-        return self.get_support().has_MAGICCLOSE
+proc keepalive*(self: LinuxWatchdogDevice) =
+  ## Send keepalive to watchdog.
+  if self.fd < 0:
+    raise newException(WatchdogError, "Watchdog device is closed")
 
-    def _ioctl(self, func: int, arg: Any) -> None:
-        """Runs the specified ioctl on the underlying fd.
+  when defined(posix):
+    let written = posix.write(self.fd, "1".cstring, 1)
+    if written != 1:
+      raise newException(WatchdogError, "Could not send watchdog keepalive")
+  else:
+    raise newException(WatchdogError, "Not supported")
 
-        Raises WatchdogError if the device is closed.
-        Raises OSError or IOError (Python 2) when the ioctl fails."""
-        if self._fd is None:
-            raise WatchdogError("Watchdog device is closed")
-        if os.name != 'nt':
-            import fcntl
-            fcntl.ioctl(self._fd, func, arg, True)
+proc hasSetTimeout*(self: LinuxWatchdogDevice): bool =
+  ## Check if setting timeout is supported.
+  result = self.getSupport().hasSettimeout
 
-    def get_support(self) -> WatchdogInfo:
-        if self._support_cache is None:
-            info = watchdog_info()
-            try:
-                self._ioctl(WDIOC_GETSUPPORT, info)
-            except (WatchdogError, OSError, IOError) as e:
-                raise WatchdogError("Could not get information about watchdog device: {}".format(e))
-            self._support_cache = WatchdogInfo(info.options,
-                                               info.firmware_version,
-                                               bytearray(info.identity).decode(errors='ignore').rstrip('\x00'))
-        return self._support_cache
+proc setTimeout*(self: LinuxWatchdogDevice, timeout: int) =
+  ## Set watchdog timeout.
+  if timeout <= 0 or timeout >= 0xFFFF:
+    raise newException(WatchdogError,
+      fmt"Invalid timeout {timeout}. Supported values are between 1 and 65535")
 
-    def describe(self) -> str:
-        dev_str = " at {0}".format(self.device) if self.device != self.DEFAULT_DEVICE else ""
-        ver_str = ""
-        identity = "Linux watchdog device"
-        if self._fd:
-            try:
-                _, version, identity = self.get_support()
-                ver_str = " (firmware {0})".format(version) if version else ""
-            except WatchdogError:
-                pass
+  var timeoutVal: cint = cint(timeout)
+  if not self.doIoctl(WDIOC_SETTIMEOUT, addr timeoutVal):
+    raise newException(WatchdogError, "Could not set timeout on watchdog device")
 
-        return identity + ver_str + dev_str
+proc getTimeout*(self: LinuxWatchdogDevice): int =
+  ## Get watchdog timeout.
+  var timeout: cint = 0
+  if not self.doIoctl(WDIOC_GETTIMEOUT, addr timeout):
+    raise newException(WatchdogError, "Could not get timeout from watchdog device")
+  result = int(timeout)
 
-    def keepalive(self) -> None:
-        if self._fd is None:
-            raise WatchdogError("Watchdog device is closed")
-        try:
-            os.write(self._fd, b'1')
-        except OSError as e:
-            raise WatchdogError("Could not send watchdog keepalive: {0}".format(e))
+# Testing watchdog device for tests
 
-    def has_set_timeout(self) -> bool:
-        """Returns True if setting a timeout is supported."""
-        return self.get_support().has_SETTIMEOUT
+type
+  TestingWatchdogDevice* = ref object of LinuxWatchdogDevice
+    ## Test harness for watchdog device.
+    timeout: int
 
-    def set_timeout(self, timeout: int) -> None:
-        timeout = int(timeout)
-        if not 0 < timeout < 0xFFFF:
-            raise WatchdogError("Invalid timeout {0}. Supported values are between 1 and 65535".format(timeout))
-        try:
-            self._ioctl(WDIOC_SETTIMEOUT, ctypes.c_int(timeout))
-        except (WatchdogError, OSError, IOError) as e:
-            raise WatchdogError("Could not set timeout on watchdog device: {}".format(e))
+proc newTestingWatchdogDevice*(device: string): TestingWatchdogDevice =
+  ## Create a testing watchdog device.
+  new(result)
+  result.device = device
+  result.fd = -1
+  result.supportCache = none(WatchdogInfo)
+  result.timeout = 60
 
-    def get_timeout(self) -> int:
-        timeout = ctypes.c_int()
-        try:
-            self._ioctl(WDIOC_GETTIMEOUT, timeout)
-        except (WatchdogError, OSError, IOError) as e:
-            raise WatchdogError("Could not get timeout on watchdog device: {}".format(e))
-        return timeout.value
+method getSupport*(self: TestingWatchdogDevice): WatchdogInfo =
+  ## Get fake support information.
+  result.options = uint32(WDIOF_MAGICCLOSE or WDIOF_SETTIMEOUT)
+  result.firmwareVersion = 0
+  result.identity = "Watchdog test harness"
 
+method setTimeout*(self: TestingWatchdogDevice, timeout: int) =
+  ## Set timeout (writes to pipe for testing).
+  if self.fd < 0:
+    raise newException(WatchdogError, "Watchdog device is closed")
 
-class TestingWatchdogDevice(LinuxWatchdogDevice):  # pragma: no cover
-    """Converts timeout ioctls to regular writes that can be intercepted from a named pipe."""
-    timeout = 60
+  let buf = fmt"Ctimeout={timeout}\n"
+  when defined(posix):
+    discard posix.write(self.fd, buf.cstring, buf.len.csize_t)
+  self.timeout = timeout
 
-    def get_support(self) -> WatchdogInfo:
-        return WatchdogInfo(WDIOF['MAGICCLOSE'] | WDIOF['SETTIMEOUT'], 0, "Watchdog test harness")
+method getTimeout*(self: TestingWatchdogDevice): int =
+  ## Get stored timeout.
+  result = self.timeout
 
-    def set_timeout(self, timeout: int) -> None:
-        if self._fd is None:
-            raise WatchdogError("Watchdog device is closed")
-        buf = "Ctimeout={0}\n".format(timeout).encode('utf8')
-        while len(buf):
-            buf = buf[os.write(self._fd, buf):]
-        self.timeout = timeout
-
-    def get_timeout(self) -> int:
-        return self.timeout

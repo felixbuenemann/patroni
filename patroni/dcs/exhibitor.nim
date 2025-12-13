@@ -1,81 +1,152 @@
-import json
-import logging
-import random
-import time
+## Exhibitor-based ZooKeeper ensemble provider.
+##
+## This module extends ZooKeeper DCS with Exhibitor ensemble discovery.
 
-from typing import Any, Callable, cast, Dict, List, Union
+import std/[algorithm, httpclient, json, random, sequtils, strformat, strutils, tables, times]
+import ../log
+import ../request
+import ../utils
+import ./base
+import ./zookeeper
 
-from ..postgresql.mpp import AbstractMPP
-from ..request import get as requests_get
-from ..utils import uri
-from . import Cluster
-from .zookeeper import ZooKeeper
+export base, zookeeper
 
-logger = logging.getLogger(__name__)
+let logger = getLogger("patroni.dcs.exhibitor")
 
+type
+  ExhibitorEnsembleProvider* = ref object
+    ## Provider for ZooKeeper ensemble from Exhibitor.
+    exhibitorPort: int
+    uriPath: string
+    pollInterval: int
+    exhibitors: seq[string]
+    bootExhibitors: seq[string]
+    zookeeperHosts: string
+    nextPoll: Option[float]
 
-class ExhibitorEnsembleProvider(object):
+const
+  TIMEOUT = 3.1
 
-    TIMEOUT = 3.1
+proc newExhibitorEnsembleProvider*(hosts: seq[string], port: int,
+                                    uriPath: string = "/exhibitor/v1/cluster/list",
+                                    pollInterval: int = 300): ExhibitorEnsembleProvider =
+  ## Create a new ExhibitorEnsembleProvider.
+  ##
+  ## :param hosts: List of Exhibitor hosts.
+  ## :param port: Exhibitor port.
+  ## :param uriPath: URI path for cluster list endpoint.
+  ## :param pollInterval: How often to poll for ensemble changes.
+  new(result)
+  result.exhibitorPort = port
+  result.uriPath = uriPath
+  result.pollInterval = pollInterval
+  result.exhibitors = hosts
+  result.bootExhibitors = hosts
+  result.zookeeperHosts = ""
+  result.nextPoll = none(float)
 
-    def __init__(self, hosts: List[str], port: int,
-                 uri_path: str = '/exhibitor/v1/cluster/list', poll_interval: int = 300) -> None:
-        self._exhibitor_port = port
-        self._uri_path = uri_path
-        self._poll_interval = poll_interval
-        self._exhibitors: List[str] = hosts
-        self._boot_exhibitors = hosts
-        self._zookeeper_hosts = ''
-        self._next_poll = None
-        while not self.poll():
-            logger.info('waiting on exhibitor')
-            time.sleep(5)
+  # Wait for initial ensemble
+  while not result.poll():
+    logger.info("waiting on exhibitor")
+    sleep(5000)
 
-    def poll(self) -> bool:
-        if self._next_poll and self._next_poll > time.time():
-            return False
+proc queryExhibitors(self: ExhibitorEnsembleProvider, exhibitors: seq[string]): Option[JsonNode] =
+  ## Query Exhibitor hosts for ensemble information.
+  var hosts = exhibitors
+  shuffle(hosts)
 
-        json = self._query_exhibitors(self._exhibitors)
-        if not json:
-            json = self._query_exhibitors(self._boot_exhibitors)
+  for host in hosts:
+    try:
+      let url = fmt"http://{host}:{self.exhibitorPort}{self.uriPath}"
+      let response = httpGet(url, timeout = TIMEOUT)
+      if response.isSome:
+        let data = parseJson(response.get)
+        return some(data)
+    except:
+      logger.debug(fmt"Request to {host} failed")
 
-        if isinstance(json, dict) and 'servers' in json and 'port' in json:
-            self._next_poll = time.time() + self._poll_interval
-            servers: List[str] = cast(Dict[str, Any], json)['servers']
-            port = str(cast(Dict[str, Any], json)['port'])
-            zookeeper_hosts = ','.join([h + ':' + port for h in sorted(servers)])
-            if self._zookeeper_hosts != zookeeper_hosts:
-                logger.info('ZooKeeper connection string has changed: %s => %s', self._zookeeper_hosts, zookeeper_hosts)
-                self._zookeeper_hosts = zookeeper_hosts
-                self._exhibitors = json['servers']
-                return True
-        return False
+  return none(JsonNode)
 
-    def _query_exhibitors(self, exhibitors: List[str]) -> Any:
-        random.shuffle(exhibitors)
-        for host in exhibitors:
-            try:
-                response = requests_get(uri('http', (host, self._exhibitor_port), self._uri_path), timeout=self.TIMEOUT)
-                return json.loads(response.data.decode('utf-8'))
-            except Exception:
-                logging.debug('Request to %s failed', host)
-        return None
+proc poll*(self: ExhibitorEnsembleProvider): bool =
+  ## Poll for ensemble changes.
+  ##
+  ## :returns: true if ensemble changed.
+  if self.nextPoll.isSome and self.nextPoll.get > epochTime():
+    return false
 
-    @property
-    def zookeeper_hosts(self) -> str:
-        return self._zookeeper_hosts
+  var jsonData = self.queryExhibitors(self.exhibitors)
+  if jsonData.isNone:
+    jsonData = self.queryExhibitors(self.bootExhibitors)
 
+  if jsonData.isSome and jsonData.get.hasKey("servers") and jsonData.get.hasKey("port"):
+    self.nextPoll = some(epochTime() + float(self.pollInterval))
 
-class Exhibitor(ZooKeeper):
+    let data = jsonData.get
+    var servers: seq[string] = @[]
+    for server in data["servers"]:
+      servers.add(server.getStr())
 
-    def __init__(self, config: Dict[str, Any], mpp: AbstractMPP) -> None:
-        interval = config.get('poll_interval', 300)
-        self._ensemble_provider = ExhibitorEnsembleProvider(config['hosts'], config['port'], poll_interval=interval)
-        super(Exhibitor, self).__init__({**config, 'hosts': self._ensemble_provider.zookeeper_hosts}, mpp)
+    let port = $data["port"].getInt()
+    let zookeeperHosts = servers.sorted().mapIt(it & ":" & port).join(",")
 
-    def _load_cluster(
-            self, path: str, loader: Callable[[str], Union[Cluster, Dict[int, Cluster]]]
-    ) -> Union[Cluster, Dict[int, Cluster]]:
-        if self._ensemble_provider.poll():
-            self._client.set_hosts(self._ensemble_provider.zookeeper_hosts)
-        return super(Exhibitor, self)._load_cluster(path, loader)
+    if self.zookeeperHosts != zookeeperHosts:
+      logger.info(fmt"ZooKeeper connection string has changed: {self.zookeeperHosts} => {zookeeperHosts}")
+      self.zookeeperHosts = zookeeperHosts
+      self.exhibitors = servers
+      return true
+
+  return false
+
+proc getZookeeperHosts*(self: ExhibitorEnsembleProvider): string =
+  ## Get current ZooKeeper connection string.
+  result = self.zookeeperHosts
+
+type
+  Exhibitor* = ref object of ZooKeeper
+    ## ZooKeeper DCS with Exhibitor ensemble discovery.
+    ensembleProvider: ExhibitorEnsembleProvider
+
+proc newExhibitor*(config: JsonNode): Exhibitor =
+  ## Create a new Exhibitor DCS instance.
+  new(result)
+
+  let exhibSection = if config.hasKey("exhibitor"): config["exhibitor"] else: newJObject()
+
+  var hosts: seq[string] = @[]
+  if exhibSection.hasKey("hosts"):
+    for h in exhibSection["hosts"]:
+      hosts.add(h.getStr())
+
+  let port = exhibSection.getOrDefault("port").getInt(8181)
+  let pollInterval = exhibSection.getOrDefault("poll_interval").getInt(300)
+
+  result.ensembleProvider = newExhibitorEnsembleProvider(hosts, port, pollInterval = pollInterval)
+
+  # Create a modified config with resolved ZooKeeper hosts
+  var zkConfig = copy(config)
+  if not zkConfig.hasKey("zookeeper"):
+    zkConfig["zookeeper"] = newJObject()
+  zkConfig["zookeeper"]["hosts"] = %result.ensembleProvider.getZookeeperHosts()
+
+  # Initialize the ZooKeeper base
+  initAbstractDCS(result, zkConfig)
+
+  var zkHosts = result.ensembleProvider.getZookeeperHosts()
+  result.client = newZKClient(zkHosts)
+  result.ttl = config["ttl"].getInt(30)
+  result.hasFailed = false
+  result.doNotWatch = false
+  result.lastLeaderVersion = 0
+
+method loadCluster*(self: Exhibitor, path: string): Cluster =
+  ## Load cluster from ZooKeeper, polling Exhibitor first.
+  if self.ensembleProvider.poll():
+    # Ensemble changed, reconnect
+    let newHosts = self.ensembleProvider.getZookeeperHosts()
+    self.client.close()
+    self.client = newZKClient(newHosts)
+    discard self.client.connect()
+
+  # Call parent implementation
+  result = procCall ZooKeeper(self).loadCluster(path)
+
