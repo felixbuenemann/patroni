@@ -57,9 +57,9 @@ type
 const
   # Command line options that must always be passed to postmaster
   CMDLINE_OPTIONS* = {
-    "listen_addresses": (nil.string, 90100),
-    "port": (nil.string, 90100),
-    "cluster_name": (nil.string, 90500),
+    "listen_addresses": ("", 90100),
+    "port": ("", 90100),
+    "cluster_name": ("", 90500),
     "wal_level": ("hot_standby", 90100),
     "hot_standby": ("on", 90100),
     "max_connections": ("100", 90100),
@@ -140,8 +140,8 @@ proc conninfoDsnParse(dsn: string): Option[Table[string, string]] =
       inc i
       continue
 
-    var paramMatch = dsn[i..^1].match(PARAMETER_RE)
-    if paramMatch.isNone:
+    let paramMatch = dsn[i..^1].match(PARAMETER_RE)
+    if not paramMatch:
       return none(Table[string, string])
 
     let param = dsn[i..^1][0..<dsn[i..^1].find('=')].strip().toLowerAscii()
@@ -385,12 +385,12 @@ proc writePostgresqlConf*(self: ConfigHandler, configuration: Option[CaseInsensi
   writer.open()
   defer: writer.close()
 
-  let include = if "custom_conf" in self.config:
+  let includeFile = if "custom_conf" in self.config:
     self.config["custom_conf"].getStr()
   else:
     self.postgresqlBaseConfName
 
-  writer.writeline(fmt"include '{escape(include)}'")
+  writer.writeline(fmt"include '{escape(includeFile)}'")
   writer.writeline("")
 
   for name in conf.keys.toSeq.sorted():
@@ -504,7 +504,8 @@ proc buildRecoveryParams*(self: ConfigHandler, member: Member): CaseInsensitiveD
 
     # Add primary_slot_name if using slots
     let globalConf = getGlobalConfig()
-    if globalConf.getOrDefault("use_slots").getBool(true):
+    let useSlotsVal = globalConf.get("use_slots")
+    if useSlotsVal == nil or useSlotsVal.getBool(true):
       # Would get slot name from member name
       result["primary_slot_name"] = %member.name
 
@@ -523,7 +524,7 @@ proc writeRecoveryConf*(self: ConfigHandler, recoveryParams: CaseInsensitiveDict
   # For PG >= 12, create standby.signal and write params to postgresql.conf
   # For PG < 12, write recovery.conf
 
-  if recoveryParams.getOrDefault("standby_mode").getStr("") == "on":
+  if recoveryParams.getOrDefault("standby_mode", newJNull()).getStr("") == "on":
     writeFile(self.standbySignal, "")
     self.setFilePermissions(self.standbySignal)
   else:

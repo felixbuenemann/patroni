@@ -40,6 +40,9 @@ proc configurationAllowsRewind*(data: Table[string, string]): bool =
   result = data.getOrDefault("wal_log_hints setting", "off") == "on" or
            data.getOrDefault("Data page checksum version", "0") != "0"
 
+proc failed*(self: Rewind): bool
+  ## Forward declaration
+
 proc newRewind*(postgresql: pointer): Rewind =
   ## Create a new Rewind handler.
   new(result)
@@ -157,7 +160,8 @@ proc logPrimaryHistory(history: seq[tuple[timeline: int, switchpoint: int64, rea
     historyShow.add("...")
     historyShow.add(formatHistoryLine(history[^1]))
 
-  logger.info(fmt"primary: history={historyShow.join(\"\n\")}")
+  let historyStr = historyShow.join("\n")
+  logger.info(fmt"primary: history={historyStr}")
 
 proc checkTimelineAndLsn(self: Rewind, leader: Leader) =
   ## Check timeline and LSN against the leader.
@@ -185,7 +189,7 @@ proc getArchiveCommand*(self: Rewind): Option[string] =
   # Would call self.postgresql.getGucValue("archive_mode") and ("archive_command")
   result = none(string)
 
-proc buildArchiverCommand(self: Rewind, command: string, walFilename: string): string =
+proc buildArchiverCommand*(self: Rewind, command: string, walFilename: string): string =
   ## Replace placeholders in the archiver command template.
   ##
   ## :param command: Template command with placeholders.
@@ -226,7 +230,7 @@ proc fetchMissingWal(self: Rewind, restoreCommand: string, walFilename: string):
   # Would execute the command
   result = false
 
-proc findMissingWal(self: Rewind, data: string): Option[string] =
+proc findMissingWal*(self: Rewind, data: string): Option[string] =
   ## Find missing WAL file name from pg_rewind error output.
   ##
   ## :param data: Error output from pg_rewind.

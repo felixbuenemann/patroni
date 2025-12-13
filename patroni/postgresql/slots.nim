@@ -192,7 +192,7 @@ proc advanceReplicationSlot*(self: SlotsHandler, name: string, lsn: int64): bool
   # Would execute: SELECT pg_replication_slot_advance(name, lsn)
   result = true
 
-proc syncReplicationSlots*(self: SlotsHandler, cluster: Cluster, tags: Tags): bool =
+proc syncReplicationSlots*(self: SlotsHandler, cluster: dcs.Cluster, tags: Tags): bool =
   ## Synchronize replication slots with the cluster state.
   ##
   ## :param cluster: Current cluster state.
@@ -204,11 +204,10 @@ proc syncReplicationSlots*(self: SlotsHandler, cluster: Cluster, tags: Tags): bo
   var configuredSlots = initTable[string, JsonNode]()
 
   let globalConf = getGlobalConfig()
-  if globalConf.hasKey("slots"):
-    let slotsConf = globalConf["slots"]
-    if slotsConf.kind == JObject:
-      for name, conf in slotsConf.pairs:
-        configuredSlots[name] = conf
+  let slotsConf = globalConf.get("slots")
+  if slotsConf != nil and slotsConf.kind == JObject:
+    for name, conf in slotsConf.pairs:
+      configuredSlots[name] = conf
 
   # Sync configured slots
   for name, conf in configuredSlots:
@@ -291,7 +290,7 @@ proc copyLogicalSlotFromLeader*(self: SlotsHandler, slotName: string, leader: Le
 
   result = true
 
-proc handleLogicalSlots*(self: SlotsHandler, cluster: Cluster, createSlotsFunc: proc(slots: seq[string]),
+proc handleLogicalSlots*(self: SlotsHandler, cluster: dcs.Cluster, createSlotsFunc: proc(slots: seq[string]),
                          dropSlotsFunc: proc(slots: seq[string])): bool =
   ## Handle logical replication slots.
   ##
@@ -305,13 +304,12 @@ proc handleLogicalSlots*(self: SlotsHandler, cluster: Cluster, createSlotsFunc: 
   var configuredLogicalSlots: seq[string] = @[]
 
   let globalConf = getGlobalConfig()
-  if globalConf.hasKey("slots"):
-    let slotsConf = globalConf["slots"]
-    if slotsConf.kind == JObject:
-      for name, conf in slotsConf.pairs:
-        let slotType = conf.getOrDefault("type").getStr("physical")
-        if slotType == "logical":
-          configuredLogicalSlots.add(name)
+  let slotsConf = globalConf.get("slots")
+  if slotsConf != nil and slotsConf.kind == JObject:
+    for name, conf in slotsConf.pairs:
+      let slotType = conf.getOrDefault("type").getStr("physical")
+      if slotType == "logical":
+        configuredLogicalSlots.add(name)
 
   # Find slots to create and drop
   var toCreate: seq[string] = @[]

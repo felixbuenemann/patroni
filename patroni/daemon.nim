@@ -4,6 +4,8 @@
 ## Currently it is only used for the main "Thread" of ``patroni`` and ``patroni_raft_controller`` commands.
 
 import std/[os, locks, strformat, parseopt]
+when defined(posix):
+  import std/posix
 import ./config
 import ./exceptions
 import ./log
@@ -12,15 +14,16 @@ import ./version
 let logger = getLogger("patroni.daemon")
 
 # Systemd notification support
-when defined(linux):
-  proc sd_notify(unset_environment: cint, state: cstring): cint {.importc, header: "<systemd/sd-daemon.h>", dynlib: "libsystemd.so".}
+when defined(linux) and defined(systemd):
+  {.passL: "-lsystemd".}
+  proc sd_notify(unset_environment: cint, state: cstring): cint {.importc, header: "<systemd/sd-daemon.h>".}
 
   proc notifySystemd*(msg: string) =
     ## Notify systemd of daemon state.
     discard sd_notify(0, msg.cstring)
 else:
   proc notifySystemd*(msg: string) =
-    ## Stub for non-Linux systems.
+    ## Stub for non-Linux or non-systemd systems.
     discard
 
 # Signal handling
@@ -53,7 +56,6 @@ proc setupSignalHandlers*() =
   initLock(sigtermLock)
 
   when defined(posix):
-    import std/posix
     var sa: Sigaction
     sa.sa_handler = sighupHandler
     discard sigemptyset(sa.sa_mask)
@@ -203,7 +205,7 @@ proc abstractMain*[T: AbstractPatroniDaemon](createDaemon: proc(config: Config):
 
 proc showVersion*() =
   ## Display version information.
-  echo fmt"patroni {VERSION}"
+  echo fmt"patroni {patroniVersion}"
 
 proc showHelp*() =
   ## Display help information.

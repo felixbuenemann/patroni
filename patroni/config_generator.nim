@@ -3,7 +3,7 @@
 ## Provides machinery for `patroni --generate-config` to create configuration
 ## files either from running PostgreSQL instances or with sample defaults.
 
-import std/[json, net, options, os, sequtils, strformat, strutils, tables, terminal]
+import std/[json, nativesockets, net, options, os, osproc, sequtils, strformat, strutils, symlinks, tables, terminal]
 import ./collections
 import ./config
 import ./exceptions
@@ -42,10 +42,18 @@ proc getAddress*(): tuple[hostname: string, ip: string] =
   var ip = NO_VALUE_MSG
 
   try:
-    hostname = getHostname()
-    let addrs = getHostByName(hostname).addrList
-    if addrs.len > 0:
-      ip = $addrs[0]
+    hostname = nativesockets.getHostname()
+    # Try to resolve hostname to IP
+    try:
+      let addrInfo = nativesockets.getAddrInfo(hostname, Port(0))
+      var sockAddr: Sockaddr_storage
+      var sockLen: SockLen = SockLen(sizeof(sockAddr))
+      copyMem(addr sockAddr, addrInfo.ai_addr, addrInfo.ai_addrlen)
+      ip = nativesockets.getAddrString(cast[ptr SockAddr](addr sockAddr))
+      nativesockets.freeAddrInfo(addrInfo)
+    except:
+      # If hostname resolution fails, use the hostname itself
+      ip = NO_VALUE_MSG
   except OSError as e:
     logger.warning(fmt"Failed to obtain address: {e.msg}")
 
@@ -163,9 +171,20 @@ proc getIntMajorVersion(self: SampleConfigGenerator): int =
   ## Get PostgreSQL major version from binary.
   result = 0
   let binDir = self.config{"postgresql", "bin_dir"}.getStr("")
-  let versionStr = getMajorVersion(binDir, "postgres")
-  if versionStr.isSome:
-    result = postgresMajorVersionToInt(versionStr.get)
+  # Try to run postgres --version to get version string
+  if binDir.len > 0:
+    let pgCmd = binDir / "postgres"
+    if fileExists(pgCmd):
+      try:
+        let (output, exitCode) = execCmdEx(pgCmd & " --version")
+        if exitCode == 0:
+          # Parse version from output like "postgres (PostgreSQL) 15.0"
+          let parts = output.strip().split(' ')
+          if parts.len >= 3:
+            let versionStr = parts[^1].split('.')[0]
+            result = postgresMajorVersionToInt(versionStr)
+      except:
+        discard
 
 proc newSampleConfigGenerator*(outputFile: Option[string]): SampleConfigGenerator =
   ## Create a new SampleConfigGenerator.
@@ -271,7 +290,7 @@ proc getBinDirFromRunningInstance(self: RunningClusterConfigGenerator): string =
       let pid = parseInt(lines[0].strip())
       # Would need to get exe path from /proc/{pid}/exe
       when defined(linux):
-        let exePath = readSymlink(fmt"/proc/{pid}/exe")
+        let exePath = expandSymlink(fmt"/proc/{pid}/exe")
         result = parentDir(exePath)
   except IOError as e:
     raise newException(PatroniException, fmt"Error reading postmaster.pid: {e.msg}")

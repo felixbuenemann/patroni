@@ -3,7 +3,7 @@
 ## This module provides types and procedures for starting, stopping, and
 ## managing the PostgreSQL postmaster process.
 
-import std/[json, os, osproc, posix, re, sequtils, strformat, strutils, tables, times]
+import std/[json, options, os, osproc, posix, re, sequtils, strformat, strutils, strtabs, tables, times]
 import ../log
 
 let logger = getLogger("patroni.postgresql.postmaster")
@@ -51,13 +51,14 @@ proc isPostmasterProcess(self: PostmasterProcess): bool =
       logger.info(fmt"Process {self.pid} is not postmaster, too much difference between PID file start time {startTime} and process start time {self.createTime}")
       return false
   except ValueError:
-    logger.warning(fmt"Garbage start time value in pid file: {self.postmasterPid.getOrDefault(\"start_time\", \"\")}")
+    let startTimeVal = self.postmasterPid.getOrDefault("start_time", "")
+    logger.warning(fmt"Garbage start time value in pid file: {startTimeVal}")
 
   # Extra safety check - process can't be ourselves, our parent or our direct child
   let myPid = getpid()
   let myPpid = getppid()
   if self.pid == myPid or self.pid == myPpid:
-    logger.info(fmt"Patroni (pid={myPid}, ppid={myPpid}), \"fake postmaster\" (pid={self.pid})")
+    logger.info(fmt"Patroni (pid={myPid}, ppid={myPpid}), 'fake postmaster' (pid={self.pid})")
     return false
 
   return true
@@ -243,7 +244,8 @@ proc start*(pgcommand: string, dataDir: string, conf: string, options: seq[strin
   var cmdline = @[pgcommand, "-D", dataDir, fmt"--config-file={conf}"]
   cmdline.add(options)
 
-  logger.debug(fmt"Starting postgres: {cmdline.join(\" \")}")
+  let cmdlineStr = cmdline.join(" ")
+  logger.debug(fmt"Starting postgres: {cmdlineStr}")
 
   try:
     # Start postgres process

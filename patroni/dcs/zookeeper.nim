@@ -61,13 +61,13 @@ type
 
   ZooKeeper* = ref object of AbstractDCS
     ## ZooKeeper DCS implementation.
-    client: ZKClient
-    ttl: int
-    memberPath: string
-    leaderPath: string
-    hasFailed: bool
-    doNotWatch: bool
-    lastLeaderVersion: int64
+    client*: ZKClient
+    ttl*: int
+    memberPath*: string
+    leaderPath*: string
+    hasFailed*: bool
+    doNotWatch*: bool
+    lastLeaderVersion*: int64
 
 # ZKClient implementation (simplified - would need actual ZooKeeper protocol)
 

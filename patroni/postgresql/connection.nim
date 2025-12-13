@@ -27,6 +27,12 @@ type
     connections: Table[string, NamedConnection]
     connKwargsInternal: Table[string, string]
 
+proc connKwargs*(pool: ConnectionPool): Table[string, string]
+  ## Forward declaration
+
+proc close*(nc: NamedConnection, silent: bool = false): bool
+  ## Forward declaration
+
 proc newNamedConnection*(pool: ConnectionPool, name: string,
                          kwargsOverride: Table[string, string] = initTable[string, string]()): NamedConnection =
   ## Create an instance of NamedConnection class.

@@ -51,7 +51,7 @@ proc run*(self: RaftController) =
   ## Run the raft controller main loop.
   logger.info("Starting Raft controller")
 
-  while self.running:
+  while not self.isReceivedSigterm():
     self.runCycle()
     # Sleep for tick period
     sleep(100)
@@ -60,13 +60,25 @@ proc run*(self: RaftController) =
 
 proc main*() =
   ## Main entry point for the raft controller.
-  let args = parseBaseArgs()
+  let args = getBaseArgParser()
 
-  if args.configfile.len == 0:
+  if args.showVersion:
+    showVersion()
+    quit(0)
+
+  if args.showHelp:
+    echo "Usage: patroni_raft_controller [OPTIONS] <config-file>"
+    echo ""
+    echo "Options:"
+    echo "  --version, -v    Show version and exit"
+    echo "  --help, -h       Show this help and exit"
+    quit(0)
+
+  if args.configFile.len == 0:
     echo "Usage: patroni_raft_controller <config-file>"
     quit(1)
 
-  let config = loadConfig(args.configfile)
+  let config = newConfig(args.configFile)
   let controller = newRaftController(config)
 
   controller.run()

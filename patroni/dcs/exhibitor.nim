@@ -2,7 +2,7 @@
 ##
 ## This module extends ZooKeeper DCS with Exhibitor ensemble discovery.
 
-import std/[algorithm, httpclient, json, random, sequtils, strformat, strutils, tables, times]
+import std/[algorithm, httpclient, json, options, os, random, sequtils, strformat, strutils, tables, times]
 import ../log
 import ../request
 import ../utils
@@ -26,6 +26,9 @@ type
 
 const
   TIMEOUT = 3.1
+
+# Forward declarations
+proc poll*(self: ExhibitorEnsembleProvider): bool
 
 proc newExhibitorEnsembleProvider*(hosts: seq[string], port: int,
                                     uriPath: string = "/exhibitor/v1/cluster/list",
@@ -58,9 +61,9 @@ proc queryExhibitors(self: ExhibitorEnsembleProvider, exhibitors: seq[string]): 
   for host in hosts:
     try:
       let url = fmt"http://{host}:{self.exhibitorPort}{self.uriPath}"
-      let response = httpGet(url, timeout = TIMEOUT)
-      if response.isSome:
-        let data = parseJson(response.get)
+      let response = request.get(url)
+      if response.status == 200:
+        let data = parseJson(response.body)
         return some(data)
     except:
       logger.debug(fmt"Request to {host} failed")
@@ -138,7 +141,7 @@ proc newExhibitor*(config: JsonNode): Exhibitor =
   result.doNotWatch = false
   result.lastLeaderVersion = 0
 
-method loadCluster*(self: Exhibitor, path: string): Cluster =
+method loadCluster*(self: Exhibitor, path: string): base.Cluster =
   ## Load cluster from ZooKeeper, polling Exhibitor first.
   if self.ensembleProvider.poll():
     # Ensemble changed, reconnect

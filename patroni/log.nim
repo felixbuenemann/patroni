@@ -3,7 +3,7 @@
 ## Daemon processes will use a 2-step logging handler. Whenever a log message is issued it is initially enqueued in-memory
 ## and is later asynchronously flushed by a thread to the final destination.
 
-import std/[os, strutils, strformat, times, locks, deques, options, tables]
+import std/[json, os, strutils, strformat, times, locks, deques, options, tables]
 when defined(posix):
   import posix
 
@@ -393,12 +393,6 @@ proc stop*(pl: PatroniLogger) =
   pl.running = false
   joinThread(pl.flushThread)
 
-proc updateLoggers*(loggerNames: seq[string], level: LogLevel) =
-  ## Update log levels for multiple loggers.
-  for name in loggerNames:
-    let logger = getLogger(name)
-    logger.setLevel(level)
-
 proc parseLogLevel*(s: string): LogLevel =
   ## Parse a log level from string.
   case s.toUpperAscii()
@@ -408,3 +402,25 @@ proc parseLogLevel*(s: string): LogLevel =
   of "ERROR": result = LogLevel.Error
   of "CRITICAL", "FATAL": result = LogLevel.Critical
   else: result = LogLevel.Info
+
+proc reloadConfig*(pl: PatroniLogger, logConfig: JsonNode) =
+  ## Reload logger configuration.
+  ##
+  ## :param logConfig: JSON configuration for logging.
+  if logConfig == nil:
+    return
+
+  if "level" in logConfig:
+    let levelStr = logConfig["level"].getStr("INFO")
+    let level = parseLogLevel(levelStr)
+    pl.logger.setLevel(level)
+
+proc shutdown*(pl: PatroniLogger) =
+  ## Shutdown the logger.
+  pl.stop()
+
+proc updateLoggers*(loggerNames: seq[string], level: LogLevel) =
+  ## Update log levels for multiple loggers.
+  for name in loggerNames:
+    let logger = getLogger(name)
+    logger.setLevel(level)

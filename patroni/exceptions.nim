@@ -30,6 +30,9 @@ type
   PatroniAssertionError* = object of PatroniException
     ## Any issue related to type/value validation.
 
+  NotImplementedError* = object of PatroniException
+    ## Method or function is not implemented.
+
 proc newPatroniException*(value: string): ref PatroniException =
   ## Create a new instance of PatroniException with the given description.
   ##
