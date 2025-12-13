@@ -1,138 +1,144 @@
-import logging
-import subprocess
+## Cancellable subprocess execution.
 
-from threading import Lock
-from typing import Any, Dict, List, Optional
+import std/[locks, os, osproc, strformat, options]
+import ../exceptions
+import ../log
+import ../utils
 
-import psutil
+let logger = getLogger("patroni.postgresql.cancellable")
 
-from patroni.exceptions import PostgresException
-from patroni.utils import polling_loop
+type
+  CancellableExecutor* = ref object of RootObj
+    ## There must be only one such process so that AsyncExecutor can easily cancel it.
+    process: Process
+    processCmd: seq[string]
+    processChildren: seq[int]  # PIDs of child processes
+    lock: Lock
 
-logger = logging.getLogger(__name__)
+  CancellableSubprocess* = ref object of CancellableExecutor
+    isCancelledFlag: bool
 
+proc newCancellableExecutor*(): CancellableExecutor =
+  ## Create a new CancellableExecutor instance.
+  new(result)
+  result.process = nil
+  result.processCmd = @[]
+  result.processChildren = @[]
+  initLock(result.lock)
 
-class CancellableExecutor(object):
+proc startProcess(ce: CancellableExecutor, cmd: seq[string],
+                  options: set[ProcessOption] = {poUsePath}): bool =
+  ## Start a process. This method must be executed only when the lock is acquired.
+  try:
+    ce.processChildren = @[]
+    ce.processCmd = cmd
+    ce.process = startProcess(cmd[0], args = cmd[1..^1], options = options)
+    result = true
+  except OSError, IOError:
+    logger.exception(fmt"Failed to execute {cmd}", nil)
+    result = false
 
-    """
-    There must be only one such process so that AsyncExecutor can easily cancel it.
-    """
+proc killProcess(ce: CancellableExecutor) =
+  ## Kill the running process.
+  withLock(ce.lock):
+    if ce.process != nil and running(ce.process):
+      try:
+        terminate(ce.process)
+        logger.warning(fmt"Killed {ce.processCmd} because it was still running")
+      except OSError:
+        discard
 
-    def __init__(self) -> None:
-        self._process = None
-        self._process_cmd = None
-        self._process_children: List[psutil.Process] = []
-        self._lock = Lock()
+proc killChildren(ce: CancellableExecutor) =
+  ## Kill child processes.
+  withLock(ce.lock):
+    for pid in ce.processChildren:
+      try:
+        # In Nim, we would use posix.kill(pid, SIGKILL)
+        when defined(posix):
+          import posix
+          discard posix.kill(Pid(pid), SIGKILL)
+      except OSError:
+        discard
+    ce.processChildren = @[]
 
-    def _start_process(self, cmd: List[str], *args: Any, **kwargs: Any) -> Optional[bool]:
-        """This method must be executed only when the `_lock` is acquired"""
+proc newCancellableSubprocess*(): CancellableSubprocess =
+  ## Create a new CancellableSubprocess instance.
+  new(result)
+  result.process = nil
+  result.processCmd = @[]
+  result.processChildren = @[]
+  initLock(result.lock)
+  result.isCancelledFlag = false
 
-        try:
-            self._process_children = []
-            self._process_cmd = cmd
-            self._process = psutil.Popen(cmd, *args, **kwargs)
-        except Exception:
-            return logger.exception('Failed to execute %s', cmd)
-        return True
+proc call*(cs: CancellableSubprocess, cmd: seq[string],
+           input: string = ""): Option[int] =
+  ## Execute command and wait for it to finish.
+  ##
+  ## :param cmd: command to execute.
+  ## :param input: optional input to send to stdin.
+  ##
+  ## :returns: exit code of the process or none if cancelled.
+  try:
+    withLock(cs.lock):
+      if cs.isCancelledFlag:
+        raise newException(PostgresException, "cancelled")
 
-    def _kill_process(self) -> None:
-        with self._lock:
-            if self._process is not None and self._process.is_running() and not self._process_children:
-                try:
-                    self._process.suspend()  # Suspend the process before getting list of children
-                except psutil.Error as e:
-                    logger.info('Failed to suspend the process: %s', e.msg)
+      cs.isCancelledFlag = false
+      var options: set[ProcessOption] = {poUsePath}
+      if input.len > 0:
+        options.incl(poStdErrToStdOut)
 
-                try:
-                    self._process_children = self._process.children(recursive=True)
-                except psutil.Error:
-                    pass
+      if not cs.startProcess(cmd, options):
+        return none(int)
 
-                try:
-                    self._process.kill()
-                    logger.warning('Killed %s because it was still running', self._process_cmd)
-                except psutil.NoSuchProcess:
-                    pass
-                except psutil.AccessDenied as e:
-                    logger.warning('Failed to kill the process: %s', e.msg)
+    if cs.process != nil:
+      if input.len > 0:
+        let inputStream = inputStream(cs.process)
+        inputStream.write(input)
+        if input[^1] != '\n':
+          inputStream.write("\n")
+        inputStream.close()
 
-    def _kill_children(self) -> None:
-        waitlist: List[psutil.Process] = []
-        with self._lock:
-            for child in self._process_children:
-                try:
-                    child.kill()
-                except psutil.NoSuchProcess:
-                    continue
-                except psutil.AccessDenied as e:
-                    logger.info('Failed to kill child process: %s', e.msg)
-                waitlist.append(child)
-        psutil.wait_procs(waitlist)
+      let exitCode = waitForExit(cs.process)
+      return some(exitCode)
+  except PostgresException:
+    return none(int)
+  finally:
+    withLock(cs.lock):
+      if cs.process != nil:
+        close(cs.process)
+        cs.process = nil
+    cs.killChildren()
 
+proc resetIsCancelled*(cs: CancellableSubprocess) =
+  ## Reset the cancelled flag.
+  withLock(cs.lock):
+    cs.isCancelledFlag = false
 
-class CancellableSubprocess(CancellableExecutor):
+proc isCancelled*(cs: CancellableSubprocess): bool =
+  ## Check if the subprocess is cancelled.
+  withLock(cs.lock):
+    result = cs.isCancelledFlag
 
-    def __init__(self) -> None:
-        super(CancellableSubprocess, self).__init__()
-        self._is_cancelled = False
+proc cancel*(cs: CancellableSubprocess, kill: bool = false) =
+  ## Cancel the running subprocess.
+  ##
+  ## :param kill: if true, force kill after timeout.
+  withLock(cs.lock):
+    cs.isCancelledFlag = true
+    if cs.process == nil or not running(cs.process):
+      return
 
-    def call(self, *args: Any, **kwargs: Any) -> Optional[int]:
-        for s in ('stdin', 'stdout', 'stderr'):
-            kwargs.pop(s, None)
+    logger.info(fmt"Terminating {cs.processCmd}")
+    terminate(cs.process)
 
-        communicate: Optional[Dict[str, str]] = kwargs.pop('communicate', None)
-        input_data = None
-        if isinstance(communicate, dict):
-            input_data = communicate.get('input')
-            if input_data:
-                if input_data[-1] != '\n':
-                    input_data += '\n'
-                input_data = input_data.encode('utf-8')
-            kwargs['stdin'] = subprocess.PIPE
-            kwargs['stdout'] = subprocess.PIPE
-            kwargs['stderr'] = subprocess.PIPE
+  # Wait for process to terminate
+  for i in 0..<100:  # ~10 seconds with 100ms sleep
+    withLock(cs.lock):
+      if cs.process == nil or not running(cs.process):
+        return
+    if kill:
+      break
+    sleep(100)
 
-        try:
-            with self._lock:
-                if self._is_cancelled:
-                    raise PostgresException('cancelled')
-
-                self._is_cancelled = False
-                started = self._start_process(*args, **kwargs)
-
-            if started and self._process is not None:
-                if isinstance(communicate, dict):
-                    communicate['stdout'], communicate['stderr'] = \
-                        self._process.communicate(input_data)  # pyright: ignore [reportGeneralTypeIssues]
-                return self._process.wait()
-        finally:
-            with self._lock:
-                self._process = None
-            self._kill_children()
-
-    def reset_is_cancelled(self) -> None:
-        with self._lock:
-            self._is_cancelled = False
-
-    @property
-    def is_cancelled(self) -> bool:
-        with self._lock:
-            return self._is_cancelled
-
-    def cancel(self, kill: bool = False) -> None:
-        with self._lock:
-            self._is_cancelled = True
-            if self._process is None or not self._process.is_running():
-                return
-
-            logger.info('Terminating %s', self._process_cmd)
-            self._process.terminate()
-
-        for _ in polling_loop(10):
-            with self._lock:
-                if self._process is None or not self._process.is_running():
-                    return
-            if kill:
-                break
-
-        self._kill_process()
+  cs.killProcess()

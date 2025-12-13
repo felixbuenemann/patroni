@@ -1,182 +1,305 @@
-"""Facilities for handling communication with Patroni's REST API."""
-import json
+## Facilities for handling communication with Patroni's REST API.
 
-from typing import Any, Dict, Optional, Union
+import std/[httpclient, json, options, strutils, tables, net, uri]
+import ./utils
 
-import urllib3
+type
+  PatroniRequest* = ref object
+    ## Wrapper for performing requests to Patroni's REST API.
+    ##
+    ## Prepares the request manager with the configured settings before performing the request.
+    insecure: Option[bool]
+    pool: HttpClient
+    headers: HttpHeaders
+    sslContext: SslContext
+    certFile: string
+    keyFile: string
+    keyPassword: string
+    caFile: string
 
-from .config import Config
-from .dcs import Member
-from .utils import USER_AGENT
+  PatroniResponse* = object
+    ## HTTP response wrapper.
+    status*: int
+    body*: string
+    headers*: HttpHeaders
 
+# Forward declarations
+proc reloadConfig*(req: PatroniRequest, config: Table[string, JsonNode])
 
-class HTTPSConnectionPool(urllib3.HTTPSConnectionPool):
+proc getCtlValue(config: Table[string, JsonNode], name: string, default: JsonNode = nil): JsonNode =
+  ## Get value of name setting from the ``ctl`` section of the config.
+  ##
+  ## :param config: Patroni YAML configuration.
+  ## :param name: name of the setting value to be retrieved.
+  ##
+  ## :returns: value of ``ctl.name`` if present, nil otherwise.
+  if "ctl" in config:
+    let ctl = config["ctl"]
+    if ctl.kind == JObject and name in ctl:
+      return ctl[name]
+  return default
 
-    def _validate_conn(self, *args: Any, **kwargs: Any) -> None:
-        """Override parent method to silence warnings about requests without certificate verification enabled."""
+proc getRestapiValue(config: Table[string, JsonNode], name: string): JsonNode =
+  ## Get value of name setting from the ``restapi`` section of the config.
+  ##
+  ## :param config: Patroni YAML configuration.
+  ## :param name: name of the setting value to be retrieved.
+  ##
+  ## :returns: value of ``restapi.name`` if present, nil otherwise.
+  if "restapi" in config:
+    let restapi = config["restapi"]
+    if restapi.kind == JObject and name in restapi:
+      return restapi[name]
+  return nil
 
+proc newPatroniRequest*(config: Table[string, JsonNode] = initTable[string, JsonNode](),
+                        insecure: Option[bool] = none(bool)): PatroniRequest =
+  ## Create a new PatroniRequest instance with given config.
+  ##
+  ## :param config: Patroni YAML configuration.
+  ## :param insecure: how to deal with SSL certs verification:
+  ##
+  ##     * If true it will perform REST API requests without verifying SSL certs; or
+  ##     * If false it will perform REST API requests and verify SSL certs; or
+  ##     * If none it will behave according to the value of ``ctl.insecure`` configuration; or
+  ##     * If none of the above applies, then it falls back to false.
+  new(result)
+  result.insecure = insecure
+  result.headers = newHttpHeaders()
+  result.certFile = ""
+  result.keyFile = ""
+  result.keyPassword = ""
+  result.caFile = ""
+  result.pool = newHttpClient()
+  result.reloadConfig(config)
 
-class PatroniPoolManager(urllib3.PoolManager):
+proc applySslContext(req: PatroniRequest) =
+  ## Apply SSL context based on current configuration.
+  when defined(ssl):
+    var verifyMode = CVerifyPeer
+    if req.insecure.isSome and req.insecure.get():
+      verifyMode = CVerifyNone
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super(PatroniPoolManager, self).__init__(*args, **kwargs)
-        self.pool_classes_by_scheme = {'http': urllib3.HTTPConnectionPool, 'https': HTTPSConnectionPool}
+    if req.certFile.len > 0:
+      req.sslContext = newContext(verifyMode = verifyMode,
+                                  certFile = req.certFile,
+                                  keyFile = req.keyFile)
+    elif req.caFile.len > 0:
+      req.sslContext = newContext(verifyMode = verifyMode,
+                                  caFile = req.caFile)
+    else:
+      req.sslContext = newContext(verifyMode = verifyMode)
 
+    req.pool = newHttpClient(sslContext = req.sslContext)
 
-class PatroniRequest(object):
-    """Wrapper for performing requests to Patroni's REST API.
+proc applySslFileParam(req: PatroniRequest, config: Table[string, JsonNode], name: string): string =
+  ## Apply a given SSL related param to the request manager.
+  ##
+  ## :param config: Patroni YAML configuration.
+  ## :param name: prefix of the Patroni SSL related setting name. Currently, supports these:
+  ##
+  ##     * ``cert``: gets translated to ``certfile``
+  ##     * ``key``: gets translated to ``keyfile``
+  ##
+  ##     Will attempt to fetch the requested key first from ``ctl`` section.
+  ##
+  ## :returns: value of ``ctl.{name}file`` if present, empty string otherwise.
+  let value = getCtlValue(config, name & "file")
+  if value != nil and value.kind == JString:
+    result = value.getStr()
+  else:
+    result = ""
 
-    Prepares the request manager with the configured settings before performing the request.
-    """
+proc reloadConfig*(req: PatroniRequest, config: Table[string, JsonNode]) =
+  ## Apply config to request manager.
+  ##
+  ## Configure these HTTP headers for requests:
+  ##
+  ##     * ``authorization``: based on Patroni' CTL or REST API authentication config;
+  ##     * ``user-agent``: based on ``patroni.utils.USER_AGENT``.
+  ##
+  ## Also configure SSL related settings for requests:
+  ##
+  ##     * ``ca_certs`` is configured if ``ctl.cacert`` or ``restapi.cafile`` is available;
+  ##     * ``cert``, ``key`` and ``key_password`` are configured if ``ctl.certfile`` is available.
+  ##
+  ## :param config: Patroni YAML configuration.
 
-    def __init__(self, config: Union[Config, Dict[str, Any]], insecure: Optional[bool] = None) -> None:
-        """Create a new :class:`PatroniRequest` instance with given *config*.
+  # Get auth configuration
+  var basicAuth = ""
+  let ctlAuth = getCtlValue(config, "auth")
+  let restapiAuth = getRestapiValue(config, "auth")
 
-        :param config: Patroni YAML configuration.
-        :param insecure: how to deal with SSL certs verification:
+  if ctlAuth != nil and ctlAuth.kind == JString:
+    basicAuth = ctlAuth.getStr()
+  elif restapiAuth != nil and restapiAuth.kind == JString:
+    basicAuth = restapiAuth.getStr()
 
-            * If ``True`` it will perform REST API requests without verifying SSL certs; or
-            * If ``False`` it will perform REST API requests and verify SSL certs; or
-            * If ``None`` it will behave according to the value of ``ctl.insecure`` configuration; or
-            * If none of the above applies, then it falls back to ``False``.
-        """
-        self._insecure = insecure
-        self._pool = PatroniPoolManager(num_pools=10, maxsize=10)
-        self.reload_config(config)
+  # Set headers
+  req.headers = newHttpHeaders()
+  req.headers["User-Agent"] = USER_AGENT
 
-    @staticmethod
-    def _get_ctl_value(config: Union[Config, Dict[str, Any]], name: str, default: Any = None) -> Optional[Any]:
-        """Get value of *name* setting from the ``ctl`` section of the *config*.
+  if basicAuth.len > 0:
+    let encoded = encode(basicAuth)
+    req.headers["Authorization"] = "Basic " & encoded
 
-        :param config: Patroni YAML configuration.
-        :param name: name of the setting value to be retrieved.
+  # Determine insecure mode
+  var isInsecure = false
+  if req.insecure.isSome:
+    isInsecure = req.insecure.get()
+  else:
+    let insecureVal = getCtlValue(config, "insecure", newJBool(false))
+    if insecureVal != nil and insecureVal.kind == JBool:
+      isInsecure = insecureVal.getBool()
 
-        :returns: value of ``ctl.*name*`` if present, ``None`` otherwise.
-        """
-        return config.get('ctl', {}).get(name, default)
+  # Apply SSL file parameters
+  req.certFile = req.applySslFileParam(config, "cert")
+  if req.certFile.len > 0:
+    req.keyFile = req.applySslFileParam(config, "key")
+    let passwordVal = getCtlValue(config, "keyfile_password")
+    if passwordVal != nil and passwordVal.kind == JString:
+      req.keyPassword = passwordVal.getStr()
 
-    @staticmethod
-    def _get_restapi_value(config: Union[Config, Dict[str, Any]], name: str) -> Optional[Any]:
-        """Get value of *name* setting from the ``restapi`` section of the *config*.
+  # Get CA certificate
+  var cacert = ""
+  let cacertVal = getCtlValue(config, "cacert")
+  let cafileVal = getRestapiValue(config, "cafile")
 
-        :param config: Patroni YAML configuration.
-        :param name: name of the setting value to be retrieved.
+  if cacertVal != nil and cacertVal.kind == JString:
+    cacert = cacertVal.getStr()
+  elif cafileVal != nil and cafileVal.kind == JString:
+    cacert = cafileVal.getStr()
 
-        :returns: value of ``restapi -> *name*`` if present, ``None`` otherwise.
-        """
-        return config.get('restapi', {}).get(name)
+  req.caFile = cacert
 
-    def _apply_pool_param(self, param: str, value: Any) -> None:
-        """Configure *param* as *value* in the request manager.
+  # Apply SSL context
+  if isInsecure:
+    req.insecure = some(true)
+  req.applySslContext()
 
-        :param param: name of the setting to be changed.
-        :param value: new value for *param*. If ``None``, ``0``, ``False``, and similar values, then explicit *param*
-            declaration is removed, in which case it takes its default value, if any.
-        """
-        if value:
-            self._pool.connection_pool_kw[param] = value
-        else:
-            self._pool.connection_pool_kw.pop(param, None)
+proc request*(req: PatroniRequest, httpMethod: string, url: string,
+              body: string = ""): PatroniResponse =
+  ## Perform an HTTP request.
+  ##
+  ## :param httpMethod: the HTTP method to be used, e.g. ``GET``.
+  ## :param url: the URL to be requested.
+  ## :param body: anything to be used as the request body.
+  ##
+  ## :returns: the response returned upon request.
 
-    def _apply_ssl_file_param(self, config: Union[Config, Dict[str, Any]], name: str) -> Union[str, None]:
-        """Apply a given SSL related param to the request manager.
+  # Set headers on the client
+  for key, value in req.headers.pairs:
+    req.pool.headers[key] = value
 
-        :param config: Patroni YAML configuration.
-        :param name: prefix of the Patroni SSL related setting name. Currently, supports these:
+  let response = req.pool.request(url, httpMethod = parseEnum[HttpMethod]("http" & httpMethod),
+                                  body = body)
 
-            * ``cert``: gets translated to ``certfile``
-            * ``key``: gets translated to ``keyfile``
+  result = PatroniResponse(
+    status: response.code.int,
+    body: response.body,
+    headers: response.headers
+  )
 
-            Will attempt to fetch the requested key first from ``ctl`` section.
+proc request*(req: PatroniRequest, httpMethod: string, url: string,
+              body: JsonNode): PatroniResponse =
+  ## Perform an HTTP request with JSON body.
+  ##
+  ## :param httpMethod: the HTTP method to be used, e.g. ``GET``.
+  ## :param url: the URL to be requested.
+  ## :param body: JSON to be used as the request body.
+  ##
+  ## :returns: the response returned upon request.
+  req.request(httpMethod, url, $body)
 
-        :returns: value of ``ctl.*name*file`` if present, ``None`` otherwise.
-        """
-        value = self._get_ctl_value(config, name + 'file')
-        self._apply_pool_param(name + '_file', value)
-        return value
+proc call*(req: PatroniRequest, memberApiUrl: string, httpMethod: string = "GET",
+           endpoint: string = "", data: string = ""): PatroniResponse =
+  ## Perform a request to a cluster member.
+  ##
+  ## :param memberApiUrl: base URL for the REST API.
+  ## :param httpMethod: HTTP method to be used, e.g. ``GET``.
+  ## :param endpoint: URL path of this request, e.g. ``switchover``.
+  ## :param data: anything to be used as the request body.
+  ##
+  ## :returns: the response returned upon request.
+  var url = memberApiUrl
+  if not url.endsWith("/"):
+    url &= "/"
+  if endpoint.len > 0:
+    url &= endpoint
 
-    def reload_config(self, config: Union[Config, Dict[str, Any]]) -> None:
-        """Apply *config* to request manager.
+  req.request(httpMethod, url, data)
 
-        Configure these HTTP headers for requests:
+proc get*(url: string, verify: bool = true): PatroniResponse =
+  ## Perform an HTTP GET request.
+  ##
+  ## .. note::
+  ##     It uses PatroniRequest so all relevant configuration is applied before processing the request.
+  ##
+  ## :param url: full URL for this GET request.
+  ## :param verify: if it should verify SSL certificates when processing the request.
+  ##
+  ## :returns: the response returned from the request.
+  let insecure = if verify: some(false) else: some(true)
+  let http = newPatroniRequest(initTable[string, JsonNode](), insecure)
+  http.request("GET", url)
 
-            * ``authorization``: based on Patroni' CTL or REST API authentication config;
-            * ``user-agent``: based on ``patroni.utils.USER_AGENT``.
+proc post*(url: string, body: string = "", verify: bool = true): PatroniResponse =
+  ## Perform an HTTP POST request.
+  ##
+  ## :param url: full URL for this POST request.
+  ## :param body: request body.
+  ## :param verify: if it should verify SSL certificates when processing the request.
+  ##
+  ## :returns: the response returned from the request.
+  let insecure = if verify: some(false) else: some(true)
+  let http = newPatroniRequest(initTable[string, JsonNode](), insecure)
+  http.request("POST", url, body)
 
-        Also configure SSL related settings for requests:
+proc patch*(url: string, body: string = "", verify: bool = true): PatroniResponse =
+  ## Perform an HTTP PATCH request.
+  ##
+  ## :param url: full URL for this PATCH request.
+  ## :param body: request body.
+  ## :param verify: if it should verify SSL certificates when processing the request.
+  ##
+  ## :returns: the response returned from the request.
+  let insecure = if verify: some(false) else: some(true)
+  let http = newPatroniRequest(initTable[string, JsonNode](), insecure)
+  http.request("PATCH", url, body)
 
-            * ``ca_certs`` is configured if ``ctl.cacert`` or ``restapi.cafile`` is available;
-            * ``cert``, ``key`` and ``key_password`` are configured if ``ctl.certfile`` is available.
+proc delete*(url: string, verify: bool = true): PatroniResponse =
+  ## Perform an HTTP DELETE request.
+  ##
+  ## :param url: full URL for this DELETE request.
+  ## :param verify: if it should verify SSL certificates when processing the request.
+  ##
+  ## :returns: the response returned from the request.
+  let insecure = if verify: some(false) else: some(true)
+  let http = newPatroniRequest(initTable[string, JsonNode](), insecure)
+  http.request("DELETE", url)
 
-        :param config: Patroni YAML configuration.
-        """
-        # ``ctl -> auth`` is equivalent to ``ctl -> authentication -> username`` + ``:`` +
-        # ``ctl -> authentication -> password``. And the same for ``restapi -> auth``
-        basic_auth = self._get_ctl_value(config, 'auth') or self._get_restapi_value(config, 'auth')
-        self._pool.headers = urllib3.make_headers(basic_auth=basic_auth, user_agent=USER_AGENT)
-        self._pool.connection_pool_kw['cert_reqs'] = 'CERT_REQUIRED'
+# Base64 encoding helper
+proc encode(s: string): string =
+  ## Base64 encode a string.
+  const base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  result = ""
+  var i = 0
+  while i < s.len:
+    let b0 = ord(s[i])
+    let b1 = if i + 1 < s.len: ord(s[i + 1]) else: 0
+    let b2 = if i + 2 < s.len: ord(s[i + 2]) else: 0
 
-        insecure = self._insecure if isinstance(self._insecure, bool)\
-            else self._get_ctl_value(config, 'insecure', False)
+    result.add(base64Chars[(b0 shr 2) and 0x3F])
+    result.add(base64Chars[((b0 shl 4) or (b1 shr 4)) and 0x3F])
 
-        if self._apply_ssl_file_param(config, 'cert'):
-            if insecure:  # The assert_hostname = False helps to silence warnings
-                self._pool.connection_pool_kw['assert_hostname'] = False
+    if i + 1 < s.len:
+      result.add(base64Chars[((b1 shl 2) or (b2 shr 6)) and 0x3F])
+    else:
+      result.add('=')
 
-            self._apply_ssl_file_param(config, 'key')
-            password = self._get_ctl_value(config, 'keyfile_password')
-            self._apply_pool_param('key_password', password)
-        else:
-            if insecure:  # Disable server certificate validation if requested
-                self._pool.connection_pool_kw['cert_reqs'] = 'CERT_NONE'
-            self._pool.connection_pool_kw.pop('assert_hostname', None)
-            self._pool.connection_pool_kw.pop('key_file', None)
+    if i + 2 < s.len:
+      result.add(base64Chars[b2 and 0x3F])
+    else:
+      result.add('=')
 
-        cacert = self._get_ctl_value(config, 'cacert') or self._get_restapi_value(config, 'cafile')
-        self._apply_pool_param('ca_certs', cacert)
-
-    def request(self, method: str, url: str, body: Optional[Any] = None,
-                **kwargs: Any) -> urllib3.response.HTTPResponse:
-        """Perform an HTTP request.
-
-        :param method: the HTTP method to be used, e.g. ``GET``.
-        :param url: the URL to be requested.
-        :param body: anything to be used as the request body.
-        :param kwargs: keyword arguments to be passed to :func:`urllib3.PoolManager.request`.
-
-        :returns: the response returned upon request.
-        """
-        if body is not None and not isinstance(body, str):
-            body = json.dumps(body)
-        return self._pool.request(method.upper(), url, body=body, **kwargs)
-
-    def __call__(self, member: Member, method: str = 'GET', endpoint: Optional[str] = None,
-                 data: Optional[Any] = None, **kwargs: Any) -> urllib3.response.HTTPResponse:
-        """Turn :class:`PatroniRequest` into a callable object.
-
-        When called, perform a request through the manager.
-
-        :param member: DCS member so we can fetch from it the configured base URL for the REST API.
-        :param method: HTTP method to be used, e.g. ``GET``.
-        :param endpoint: URL path of this request, e.g. ``switchover``.
-        :param data: anything to be used as the request body.
-
-        :returns: the response returned upon request.
-        """
-        url = member.get_endpoint_url(endpoint)
-        return self.request(method, url, data, **kwargs)
-
-
-def get(url: str, verify: bool = True, **kwargs: Any) -> urllib3.response.HTTPResponse:
-    """Perform an HTTP GET request.
-
-    .. note::
-        It uses :class:`PatroniRequest` so all relevant configuration is applied before processing the request.
-
-    :param url: full URL for this GET request.
-    :param verify: if it should verify SSL certificates when processing the request.
-
-    :returns: the response returned from the request.
-    """
-    http = PatroniRequest({}, not verify)
-    return http.request('GET', url, **kwargs)
+    i += 3
