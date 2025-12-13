@@ -404,9 +404,9 @@ method setRetryTimeout*(self: Etcd3, retryTimeout: int) =
 proc memberFromKV(kv: Etcd3KeyValue): Member =
   ## Create a Member from an etcd3 key-value.
   let name = kv.key.rsplit('/', 1)[^1]
-  result = fromNode(kv.modRevision, name, 0, kv.value)
+  result = fromNode(kv.modRevision, name, "", kv.value)
 
-proc clusterFromKVs(self: Etcd3, kvs: seq[Etcd3KeyValue], revision: int64): Cluster =
+proc clusterFromKVs(self: Etcd3, kvs: seq[Etcd3KeyValue], revision: int64): base.Cluster =
   ## Build a Cluster from etcd3 key-values.
   result = newCluster()
   self.clusterRevision = revision
@@ -447,12 +447,12 @@ proc clusterFromKVs(self: Etcd3, kvs: seq[Etcd3KeyValue], revision: int64): Clus
   # Get leader
   if "leader" in kvMap:
     let leaderKv = kvMap["leader"]
-    var member = newMember(-1, leaderKv.value, 0, initTable[string, JsonNode]())
+    var leaderMember = newRemoteMember(leaderKv.value, newMemberData())
     for m in result.members:
       if m.name == leaderKv.value:
-        member = m
+        leaderMember = newRemoteMember(m.name, m.data)
         break
-    result.leader = newLeader(leaderKv.modRevision, "", member)
+    result.leader = newLeader(leaderKv.modRevision, "", leaderMember)
 
   # Get failover key
   if "failover" in kvMap:
@@ -464,7 +464,7 @@ proc clusterFromKVs(self: Etcd3, kvs: seq[Etcd3KeyValue], revision: int64): Clus
     let syncKv = kvMap["sync"]
     result.sync = syncStateFromNode(syncKv.modRevision, syncKv.value)
 
-method loadCluster*(self: Etcd3, path: string): Cluster =
+method loadCluster*(self: Etcd3, path: string): base.Cluster =
   ## Load cluster from etcd3.
   try:
     let kvs = self.client.getPrefix(self.clientPath(""))

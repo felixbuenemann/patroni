@@ -388,9 +388,10 @@ proc memberFromNode(node: JsonNode): Member =
   let name = key.rsplit('/', 1)[^1]
   let value = decodeValue(node)
   let modifyIndex = node["ModifyIndex"].getInt(0)
-  result = fromNode(modifyIndex, name, 0, value)
+  let session = if node.hasKey("Session"): node["Session"].getStr() else: ""
+  result = fromNode(modifyIndex, name, session, value)
 
-proc clusterFromKv(self: Consul, index: int64, nodes: Table[string, JsonNode]): Cluster =
+proc clusterFromKv(self: Consul, index: int64, nodes: Table[string, JsonNode]): base.Cluster =
   ## Build a Cluster from Consul KV nodes.
   result = newCluster()
 
@@ -423,13 +424,13 @@ proc clusterFromKv(self: Consul, index: int64, nodes: Table[string, JsonNode]): 
   if "leader" in nodes:
     let leaderNode = nodes["leader"]
     let leaderName = decodeValue(leaderNode)
-    var member = newMember(-1, leaderName, 0, initTable[string, JsonNode]())
+    let session = if leaderNode.hasKey("Session"): leaderNode["Session"].getStr() else: ""
+    var leaderMember = newRemoteMember(leaderName, newMemberData())
     for m in result.members:
       if m.name == leaderName:
-        member = m
+        leaderMember = newRemoteMember(m.name, m.data)
         break
-    let session = if leaderNode.hasKey("Session"): leaderNode["Session"].getStr() else: ""
-    result.leader = newLeader(leaderNode["ModifyIndex"].getInt(0), session, member)
+    result.leader = newLeader(leaderNode["ModifyIndex"].getInt(0), session, leaderMember)
 
   # Get failover key
   if "failover" in nodes:
@@ -446,12 +447,11 @@ proc clusterFromKv(self: Consul, index: int64, nodes: Table[string, JsonNode]): 
     try:
       let failsafeData = parseJson(decodeValue(nodes["failsafe"]))
       if failsafeData.kind == JObject:
-        for key, val in failsafeData.pairs:
-          result.failsafe[key] = val.getStr("")
+        result.failsafe = failsafeData
     except JsonParsingError:
       discard
 
-method loadCluster*(self: Consul, path: string): Cluster =
+method loadCluster*(self: Consul, path: string): base.Cluster =
   ## Load cluster from Consul.
   try:
     let (index, kvNodes) = self.kvGet("", recurse = true)

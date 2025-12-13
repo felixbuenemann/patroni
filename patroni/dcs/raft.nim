@@ -35,18 +35,18 @@ type
 
   KVStoreTTL* = ref object
     ## Key-value store with TTL support.
-    selfAddr: string
-    partnerAddrs: seq[string]
-    data: Table[string, KVEntry]
-    retryTimeout: int
-    running: bool
-    lock: Lock
-    onSet: proc(key: string, entry: KVEntry)
-    onDelete: proc(key: string)
-    appliedLocalLog: bool
-    dataDir: string
-    password: string
-    autoTickPeriod: float
+    selfAddr*: string
+    partnerAddrs*: seq[string]
+    data*: Table[string, KVEntry]
+    retryTimeout*: int
+    running*: bool
+    lock*: Lock
+    onSet*: proc(key: string, entry: KVEntry)
+    onDelete*: proc(key: string)
+    appliedLocalLog*: bool
+    dataDir*: string
+    password*: string
+    autoTickPeriod*: float
 
   Raft* = ref object of AbstractDCS
     ## Raft DCS implementation.
@@ -100,8 +100,8 @@ proc newKVStoreTTL*(config: JsonNode): KVStoreTTL =
   result.autoTickPeriod = config.getOrDefault("loop_wait").getFloat(10.0) / 1000.0
 
   # Validate/create data directory
-  if result.dataDir.len > 0:
-    discard validateDirectory(result.dataDir)
+  if result.dataDir.len > 0 and not dirExists(result.dataDir):
+    createDir(result.dataDir)
 
 proc setRetryTimeout*(self: KVStoreTTL, timeout: int) =
   ## Set the retry timeout.
@@ -211,17 +211,10 @@ proc isLeader*(self: KVStoreTTL): bool =
 
 proc memberFromNode(key: string, entry: KVEntry): Member =
   ## Create a Member from a KV entry.
-  try:
-    let data = parseJson(entry.value)
-    var memberData = initTable[string, JsonNode]()
-    if data.kind == JObject:
-      for k, v in data.pairs:
-        memberData[k] = v
-    result = newMember(entry.index, key.split('/')[^1], 0, memberData)
-  except JsonParsingError:
-    result = newMember(entry.index, key.split('/')[^1], 0, initTable[string, JsonNode]())
+  let name = key.split('/')[^1]
+  result = fromNode(entry.index, name, "", entry.value)
 
-proc clusterFromNodes(self: Raft, nodes: Table[string, KVEntry]): Cluster =
+proc clusterFromNodes(self: Raft, nodes: Table[string, KVEntry]): base.Cluster =
   ## Build a Cluster from KV nodes.
   result = newCluster()
 
@@ -254,12 +247,12 @@ proc clusterFromNodes(self: Raft, nodes: Table[string, KVEntry]): Cluster =
   if "_LEADER" in nodes:
     let leaderEntry = nodes["_LEADER"]
     let leaderName = leaderEntry.value
-    var member = newMember(-1, leaderName, 0, initTable[string, JsonNode]())
+    var leaderMember = newRemoteMember(leaderName, newMemberData())
     for m in result.members:
       if m.name == leaderName:
-        member = m
+        leaderMember = newRemoteMember(m.name, m.data)
         break
-    result.leader = newLeader(leaderEntry.index, "", member)
+    result.leader = newLeader(leaderEntry.index, "", leaderMember)
 
   # Get failover
   if "_FAILOVER" in nodes:
@@ -303,7 +296,7 @@ method setRetryTimeout*(self: Raft, retryTimeout: int) =
   ## Set retry timeout.
   self.syncObj.setRetryTimeout(retryTimeout)
 
-method loadCluster*(self: Raft, path: string): Cluster =
+method loadCluster*(self: Raft, path: string): base.Cluster =
   ## Load cluster from Raft.
   let response = self.syncObj.get(path, recursive = true)
   if response.isNone:

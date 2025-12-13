@@ -168,6 +168,10 @@ proc newWatchdogConfig*(config: Config): WatchdogConfig =
 
 proc `==`*(a, b: WatchdogConfig): bool =
   ## Compare two WatchdogConfig instances.
+  if a.isNil and b.isNil:
+    return true
+  if a.isNil or b.isNil:
+    return false
   result = a.mode == b.mode and
            a.ttl == b.ttl and
            a.loopWait == b.loopWait and

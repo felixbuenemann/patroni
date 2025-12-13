@@ -40,15 +40,15 @@ type
 
   K8sConfig* = ref object
     ## Kubernetes configuration.
-    baseUri: string
-    token: string
-    tokenExpiresAt: DateTime
-    headers: HttpHeaders
-    caCert: string
-    clientCert: string
-    clientKey: string
-    namespace: string
-    verify: bool
+    baseUri*: string
+    token*: string
+    tokenExpiresAt*: DateTime
+    headers*: HttpHeaders
+    caCert*: string
+    clientCert*: string
+    clientKey*: string
+    namespace*: string
+    verify*: bool
 
   K8sObject* = ref object
     ## Kubernetes object representation.
@@ -441,9 +441,9 @@ proc getMemberData(annotations: Table[string, string]): Table[string, JsonNode] 
 proc memberFromPod(name: string, annotations: Table[string, string]): Member =
   ## Create a Member from pod annotations.
   let data = getMemberData(annotations)
-  result = newMember(0, name, 0, data)
+  result = fromNode(0, name, "", $(%data))
 
-proc clusterFromK8s(self: Kubernetes, obj: K8sObject): Cluster =
+proc clusterFromK8s(self: Kubernetes, obj: K8sObject): base.Cluster =
   ## Build a Cluster from Kubernetes object.
   result = newCluster()
 
@@ -468,8 +468,8 @@ proc clusterFromK8s(self: Kubernetes, obj: K8sObject): Cluster =
   # Get leader
   if "leader" in annotations:
     let leaderName = annotations["leader"]
-    var member = newMember(-1, leaderName, 0, initTable[string, JsonNode]())
-    result.leader = newLeader(0, "", member)
+    let leaderMember = newRemoteMember(leaderName, newMemberData())
+    result.leader = newLeader(0, "", leaderMember)
 
   # Get failover key
   if "failover" in annotations:
@@ -481,11 +481,11 @@ proc clusterFromK8s(self: Kubernetes, obj: K8sObject): Cluster =
 
   # Members would be loaded separately from pods/endpoints
 
-method loadCluster*(self: Kubernetes, path: string): Cluster =
+method loadCluster*(self: Kubernetes, path: string): base.Cluster =
   ## Load cluster from Kubernetes.
   try:
     # Get the config ConfigMap
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     let configData = self.client.get(configPath)
     let configObj = parseK8sObject(configData)
     self.clusterObject = some(configObj)
@@ -525,14 +525,14 @@ method touchMember*(self: Kubernetes, data: JsonNode): bool =
 method takeLeader*(self: Kubernetes): bool =
   ## Take the leader lock.
   try:
-    let leaderPath = self.configmapPath(self.scopeVal & "-leader")
+    let leaderPath = self.configmapPath(self.scope & "-leader")
 
     # Try to create or update the leader ConfigMap
     let leaderData = %*{
       "apiVersion": "v1",
       "kind": "ConfigMap",
       "metadata": {
-        "name": self.scopeVal & "-leader",
+        "name": self.scope & "-leader",
         "namespace": self.namespace,
         "annotations": {
           "leader": self.name
@@ -575,7 +575,7 @@ method setFailoverValue*(self: Kubernetes, value: string, version: int64 = 0): b
         }
       }
     }
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     discard self.client.patch(configPath, patch)
     result = true
   except KubernetesError:
@@ -591,7 +591,7 @@ method setConfigValue*(self: Kubernetes, value: string, version: int64 = 0): boo
         }
       }
     }
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     discard self.client.patch(configPath, patch)
     result = true
   except KubernetesError:
@@ -607,7 +607,7 @@ method writeLeaderOptime*(self: Kubernetes, lastLsn: string): bool =
         }
       }
     }
-    let leaderPath = self.configmapPath(self.scopeVal & "-leader")
+    let leaderPath = self.configmapPath(self.scope & "-leader")
     discard self.client.patch(leaderPath, patch)
     result = true
   except KubernetesError:
@@ -623,7 +623,7 @@ method writeStatus*(self: Kubernetes, value: string): bool =
         }
       }
     }
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     discard self.client.patch(configPath, patch)
     result = true
   except KubernetesError:
@@ -639,7 +639,7 @@ method writeFailsafe*(self: Kubernetes, value: string): bool =
         }
       }
     }
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     discard self.client.patch(configPath, patch)
     result = true
   except KubernetesError:
@@ -657,7 +657,7 @@ method initialize*(self: Kubernetes, createNew: bool = true, sysid: string = "")
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {
-          "name": self.scopeVal & "-config",
+          "name": self.scope & "-config",
           "namespace": self.namespace,
           "annotations": {
             "initialize": sysid
@@ -672,7 +672,7 @@ method initialize*(self: Kubernetes, createNew: bool = true, sysid: string = "")
 method deleteLeader*(self: Kubernetes, leader: Leader): bool =
   ## Delete the leader lock.
   try:
-    let leaderPath = self.configmapPath(self.scopeVal & "-leader")
+    let leaderPath = self.configmapPath(self.scope & "-leader")
     result = self.client.delete(leaderPath)
   except KubernetesError:
     result = false
@@ -680,7 +680,7 @@ method deleteLeader*(self: Kubernetes, leader: Leader): bool =
 method cancelInitialization*(self: Kubernetes): bool =
   ## Cancel initialization.
   try:
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     result = self.client.delete(configPath)
   except KubernetesError:
     result = false
@@ -688,8 +688,8 @@ method cancelInitialization*(self: Kubernetes): bool =
 method deleteCluster*(self: Kubernetes): bool =
   ## Delete the entire cluster data.
   try:
-    discard self.client.delete(self.configmapPath(self.scopeVal & "-config"))
-    discard self.client.delete(self.configmapPath(self.scopeVal & "-leader"))
+    discard self.client.delete(self.configmapPath(self.scope & "-config"))
+    discard self.client.delete(self.configmapPath(self.scope & "-leader"))
     result = true
   except KubernetesError:
     result = false
@@ -704,7 +704,7 @@ method setHistoryValue*(self: Kubernetes, value: string): bool =
         }
       }
     }
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     discard self.client.patch(configPath, patch)
     result = true
   except KubernetesError:
@@ -720,7 +720,7 @@ method setSyncStateValue*(self: Kubernetes, value: string, version: int64 = 0): 
         }
       }
     }
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     let response = self.client.patch(configPath, patch)
     if response.hasKey("metadata") and response["metadata"].hasKey("resourceVersion"):
       result = parseInt(response["metadata"]["resourceVersion"].getStr("0"))
@@ -739,7 +739,7 @@ method deleteSyncState*(self: Kubernetes, version: int64 = 0): bool =
         }
       }
     }
-    let configPath = self.configmapPath(self.scopeVal & "-config")
+    let configPath = self.configmapPath(self.scope & "-config")
     discard self.client.patch(configPath, patch)
     result = true
   except KubernetesError:

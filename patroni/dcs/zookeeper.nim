@@ -217,17 +217,9 @@ method setRetryTimeout*(self: ZooKeeper, retryTimeout: int) =
 
 proc memberFromNode(name: string, data: string): Member =
   ## Create a Member from node data.
-  var memberData = initTable[string, JsonNode]()
-  try:
-    let jsonData = parseJson(data)
-    if jsonData.kind == JObject:
-      for key, val in jsonData.pairs:
-        memberData[key] = val
-  except JsonParsingError:
-    discard
-  result = newMember(0, name, 0, memberData)
+  result = fromNode(0, name, "", data)
 
-proc clusterFromZK(self: ZooKeeper, nodes: Table[string, tuple[data: string, version: int64]]): Cluster =
+proc clusterFromZK(self: ZooKeeper, nodes: Table[string, tuple[data: string, version: int64]]): base.Cluster =
   ## Build a Cluster from ZooKeeper nodes.
   result = newCluster()
 
@@ -255,8 +247,8 @@ proc clusterFromZK(self: ZooKeeper, nodes: Table[string, tuple[data: string, ver
     try:
       let jsonData = parseJson(leaderData.data)
       let leaderName = jsonData.getOrDefault("name").getStr("")
-      var member = newMember(-1, leaderName, 0, initTable[string, JsonNode]())
-      result.leader = newLeader(leaderData.version, "", member)
+      let leaderMember = newRemoteMember(leaderName, newMemberData())
+      result.leader = newLeader(leaderData.version, "", leaderMember)
     except JsonParsingError:
       discard
 
@@ -268,7 +260,7 @@ proc clusterFromZK(self: ZooKeeper, nodes: Table[string, tuple[data: string, ver
   if "sync" in nodes:
     result.sync = syncStateFromNode(nodes["sync"].version, nodes["sync"].data)
 
-method loadCluster*(self: ZooKeeper, path: string): Cluster =
+method loadCluster*(self: ZooKeeper, path: string): base.Cluster =
   ## Load cluster from ZooKeeper.
   try:
     if not self.client.isConnected():
