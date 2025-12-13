@@ -195,7 +195,7 @@ proc patchConfig(base: var Table[string, JsonNode], patch: Table[string, JsonNod
     else:
       base[key] = value
 
-proc buildEffectiveConfiguration(dynamicConfig, localConfig: Table[string, JsonNode]): Table[string, JsonNode] =
+proc buildEffectiveConfiguration*(dynamicConfig, localConfig: Table[string, JsonNode]): Table[string, JsonNode] =
   ## Build effective configuration from dynamic and local configs.
   result = getDefaultConfig()
 

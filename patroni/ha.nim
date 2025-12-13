@@ -3,11 +3,11 @@
 ## This module implements the core HA loop that manages PostgreSQL cluster state,
 ## handles failovers, promotes replicas, and maintains cluster consistency.
 
-import std/[json, locks, options, tables, times, strformat, strutils]
+import std/[json, locks, options, tables, times, strformat, strutils, os]
 import ./async_executor
 import ./collections
 import ./config
-import ./dcs
+import ./dcs/dcs
 import ./exceptions
 import ./global_config
 import ./log
@@ -236,7 +236,7 @@ proc newHa*(dcs: AbstractDCS, asyncExecutor: AsyncExecutor = nil): Ha =
   else:
     result.asyncExecutor = newAsyncExecutor()
 
-proc cluster*(self: Ha): Cluster =
+proc cluster*(self: Ha): dcs.Cluster =
   ## Get the current cluster state.
   result = self.dcs.cluster
 
@@ -273,7 +273,7 @@ proc wakeup*(self: Ha) =
   withLock(self.lock):
     self.dcs.event = true
 
-proc loadCluster*(self: Ha): Cluster =
+proc loadCluster*(self: Ha): dcs.Cluster =
   ## Load the current cluster state from DCS.
   try:
     result = self.dcs.getCluster()
@@ -293,7 +293,12 @@ proc runCycle*(self: Ha): string =
 
   # Update global config from cluster
   let gc = getGlobalConfig()
-  gc.update(cluster)
+  # Create a global_config.Cluster compatible object
+  var gcCluster = global_config.Cluster(config: global_config.ClusterConfig(
+    modifyVersion: if cluster.config != nil: cluster.config.modifyVersion else: 0,
+    data: if cluster.config != nil: cluster.config.data else: initTable[string, JsonNode]()
+  ))
+  gc.update(gcCluster)
 
   # Check if we're paused
   if self.isPaused():
