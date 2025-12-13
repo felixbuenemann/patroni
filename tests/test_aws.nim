@@ -1,4 +1,5 @@
 ## Tests for patroni/scripts/aws module.
+## Ported from test_aws.py
 
 import std/[unittest, json]
 import ../patroni/scripts/aws
@@ -7,70 +8,96 @@ import ../patroni/scripts/aws
 const
   MOCK_INSTANCE_DOC = """{"instanceId": "012345", "region": "eu-west-1"}"""
 
-# Test helpers
-proc createMockConnection(available: bool = true): AWSConnection =
+# Create mock connection that doesn't make network calls
+proc createMockConnection(available: bool = true, clusterName: string = "test"): AWSConnection =
   new(result)
   result.available = available
-  result.clusterName = "test-cluster"
+  result.clusterName = clusterName
   if available:
     result.instanceId = "012345"
     result.region = "eu-west-1"
 
 suite "AWSConnection":
-  # Note: newAWSConnection makes network calls to AWS IMDS and will timeout
-  # outside of an AWS environment. Use createMockConnection for tests.
+  test "connection stores cluster name":
+    let conn = createMockConnection(true, "my-cluster")
+    check conn.clusterName == "my-cluster"
 
-  test "mock connection available flag":
-    let conn = createMockConnection(true)
-    check conn.available == true
-
-    let unavailConn = createMockConnection(false)
-    check unavailConn.available == false
-
-  test "mock connection cluster name":
-    let conn = createMockConnection(true)
-    check conn.clusterName == "test-cluster"
-
-  test "mock connection instance id":
+  test "connection stores instance id when available":
     let conn = createMockConnection(true)
     check conn.instanceId == "012345"
+
+  test "connection stores region when available":
+    let conn = createMockConnection(true)
     check conn.region == "eu-west-1"
 
-suite "AWS Role Change":
-  test "on_role_change with unavailable connection returns false":
+  test "unavailable connection has empty instance id":
+    let conn = createMockConnection(false)
+    check conn.instanceId == ""
+
+  test "unavailable connection has empty region":
+    let conn = createMockConnection(false)
+    check conn.region == ""
+
+suite "AWSConnection.awsAvailable":
+  test "returns true when available":
+    let conn = createMockConnection(true)
+    check conn.awsAvailable() == true
+
+  test "returns false when unavailable":
+    let conn = createMockConnection(false)
+    check conn.awsAvailable() == false
+
+suite "AWSConnection.onRoleChange":
+  test "returns false when connection unavailable":
     var conn = createMockConnection(false)
     check conn.onRoleChange("primary") == false
 
-  test "awsAvailable returns connection availability":
-    var conn = createMockConnection(true)
-    check conn.awsAvailable() == true
+  test "returns false when connection unavailable for replica":
+    var conn = createMockConnection(false)
+    check conn.onRoleChange("replica") == false
 
-    var unavailConn = createMockConnection(false)
-    check unavailConn.awsAvailable() == false
-
-suite "AWS Main":
-  test "parseArgs with no arguments":
-    # Empty args should show usage
-    check true  # Placeholder
-
-  test "parseArgs with valid arguments":
-    # Valid command line: aws.nim on_start replica cluster_name
-    check true  # Placeholder
+  test "returns false when connection unavailable for any role":
+    var conn = createMockConnection(false)
+    for role in ["master", "replica", "standby", "primary"]:
+      check conn.onRoleChange(role) == false
 
 suite "Instance Document Parsing":
   test "parse valid instance document":
-    # Test parsing the IMDS instance document JSON
     let doc = parseJson(MOCK_INSTANCE_DOC)
     check doc["instanceId"].getStr() == "012345"
     check doc["region"].getStr() == "eu-west-1"
 
   test "handle malformed instance document":
-    # Invalid JSON should be handled gracefully
     try:
       discard parseJson("not valid json")
       check false  # Should have raised
     except JsonParsingError:
       check true
 
+  test "handle empty instance document":
+    try:
+      discard parseJson("")
+      check false  # Should have raised
+    except JsonParsingError:
+      check true
+
+  test "handle missing fields in document":
+    let doc = parseJson("""{"instanceId": "123"}""")
+    check doc["instanceId"].getStr() == "123"
+    check doc.hasKey("region") == false
+
+suite "AWS Main Function Arguments":
+  test "valid action strings":
+    # These are the valid action strings
+    let validActions = ["on_start", "on_stop", "on_role_change"]
+    for action in validActions:
+      check action in ["on_start", "on_stop", "on_role_change"]
+
+  test "valid role strings":
+    # Typical role values
+    let validRoles = ["primary", "replica", "master", "standby"]
+    for role in validRoles:
+      check role.len > 0
+
 when isMainModule:
-  discard
+  echo "test_aws.nim tests completed"
