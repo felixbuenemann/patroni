@@ -249,7 +249,7 @@ proc len*[V](self: CaseInsensitiveDict[V]): int =
 
 proc contains*[V](self: CaseInsensitiveDict[V], key: string): bool =
   ## Check if key exists in the dict.
-  result = key.toLowerAscii() in self.values
+  result = self.values.hasKey(key.toLowerAscii())
 
 proc hasKey*[V](self: CaseInsensitiveDict[V], key: string): bool =
   ## Check if key exists in the dict.
@@ -278,7 +278,7 @@ proc repr*[V](self: CaseInsensitiveDict[V]): string =
 proc getOrDefault*[V](self: CaseInsensitiveDict[V], key: string, default: V): V =
   ## Get value for key or return default if not found.
   let lowerKey = key.toLowerAscii()
-  if lowerKey in self.values:
+  if self.values.hasKey(lowerKey):
     result = self.values[lowerKey].value
   else:
     result = default
