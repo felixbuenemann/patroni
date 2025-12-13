@@ -1,103 +1,99 @@
-"""Helper object that helps with figuring out file and directory permissions based on permissions of PGDATA.
+## Helper object that helps with figuring out file and directory permissions based on permissions of PGDATA.
+##
+## :var pg_perm: instance of the FilePermissions object.
 
-:var logger: logger of this module.
-:var pg_perm: instance of the :class:`__FilePermissions` object.
-"""
-import logging
-import os
-import stat
+import std/[os, posix, strformat]
+import ./log
 
-logger = logging.getLogger(__name__)
+let logger = getLogger("patroni.file_perm")
 
+const
+  # Mode mask for data directory permissions that only allows the owner to
+  # read/write directories and files -- mask 077.
+  PG_MODE_MASK_OWNER = S_IRWXG or S_IRWXO
 
-class __FilePermissions:
-    """Helper class for managing permissions of directories and files under PGDATA.
+  # Mode mask for data directory permissions that also allows group read/execute -- mask 027.
+  PG_MODE_MASK_GROUP = S_IWGRP or S_IRWXO
 
-    Execute :meth:`set_permissions_from_data_directory` to figure out which permissions should be used for files and
-    directories under PGDATA based on permissions of PGDATA root directory.
-    """
+  # Default mode for creating directories -- mode 700.
+  PG_DIR_MODE_OWNER = S_IRWXU
 
-    # Mode mask for data directory permissions that only allows the owner to
-    # read/write directories and files -- mask 077.
-    __PG_MODE_MASK_OWNER = stat.S_IRWXG | stat.S_IRWXO
+  # Mode for creating directories that allows group read/execute -- mode 750.
+  PG_DIR_MODE_GROUP = S_IRWXU or S_IRGRP or S_IXGRP
 
-    # Mode mask for data directory permissions that also allows group read/execute -- mask 027.
-    __PG_MODE_MASK_GROUP = stat.S_IWGRP | stat.S_IRWXO
+  # Default mode for creating files -- mode 600.
+  PG_FILE_MODE_OWNER = S_IRUSR or S_IWUSR
 
-    # Default mode for creating directories -- mode 700.
-    __PG_DIR_MODE_OWNER = stat.S_IRWXU
+  # Mode for creating files that allows group read -- mode 640.
+  PG_FILE_MODE_GROUP = S_IRUSR or S_IWUSR or S_IRGRP
 
-    # Mode for creating directories that allows group read/execute -- mode 750.
-    __PG_DIR_MODE_GROUP = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP
+type
+  FilePermissions* = ref object
+    ## Helper class for managing permissions of directories and files under PGDATA.
+    ##
+    ## Execute setPermissionsFromDataDirectory to figure out which permissions should be used for files and
+    ## directories under PGDATA based on permissions of PGDATA root directory.
+    pgDirCreateMode: Mode
+    pgFileCreateMode: Mode
+    pgModeMask: Mode
+    origUmask*: Mode
 
-    # Default mode for creating files -- mode 600.
-    __PG_FILE_MODE_OWNER = stat.S_IRUSR | stat.S_IWUSR
+proc setOwnerPermissions(self: FilePermissions) =
+  ## Make directories/files accessible only by the owner.
+  self.pgDirCreateMode = PG_DIR_MODE_OWNER
+  self.pgFileCreateMode = PG_FILE_MODE_OWNER
+  self.pgModeMask = PG_MODE_MASK_OWNER
 
-    # Mode for creating files that allows group read -- mode 640.
-    __PG_FILE_MODE_GROUP = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP
+proc setGroupPermissions(self: FilePermissions) =
+  ## Make directories/files accessible by the owner and readable by group.
+  self.pgDirCreateMode = PG_DIR_MODE_GROUP
+  self.pgFileCreateMode = PG_FILE_MODE_GROUP
+  self.pgModeMask = PG_MODE_MASK_GROUP
 
-    def __init__(self) -> None:
-        """Create a :class:`__FilePermissions` object and set default permissions."""
-        self.__set_owner_permissions()
-        self.__orig_umask = self.__set_umask()
+proc setUmaskInternal(self: FilePermissions): Mode =
+  ## Set umask value based on calculations.
+  ##
+  ## .. note::
+  ##     Should only be called once either setOwnerPermissions
+  ##     or setGroupPermissions has been executed.
+  ##
+  ## :returns: the previous value of the umask or 0o22 if umask call failed.
+  try:
+    result = umask(self.pgModeMask)
+  except CatchableError as e:
+    logger.error(fmt"Can not set umask to {self.pgModeMask:03o}: {e.msg}")
+    result = Mode(0o22)
 
-    def __set_umask(self) -> int:
-        """Set umask value based on calculations.
+proc newFilePermissions*(): FilePermissions =
+  ## Create a FilePermissions object and set default permissions.
+  new(result)
+  result.setOwnerPermissions()
+  result.origUmask = result.setUmaskInternal()
 
-        .. note::
-            Should only be called once either :meth:`__set_owner_permissions`
-            or :meth:`__set_group_permissions` has been executed.
+proc setPermissionsFromDataDirectory*(self: FilePermissions, dataDir: string) =
+  ## Set new permissions based on provided dataDir.
+  ##
+  ## :param dataDir: reference to PGDATA to calculate permissions from.
+  var st: Stat
+  try:
+    if stat(dataDir.cstring, st) == 0:
+      if (st.st_mode and PG_DIR_MODE_GROUP) == PG_DIR_MODE_GROUP:
+        self.setGroupPermissions()
+      else:
+        self.setOwnerPermissions()
+      discard self.setUmaskInternal()
+    else:
+      logger.error(fmt"Can not check permissions on {dataDir}: stat failed")
+  except CatchableError as e:
+    logger.error(fmt"Can not check permissions on {dataDir}: {e.msg}")
 
-        :returns: the previous value of the umask or ``0022`` if umask call failed.
-        """
-        try:
-            return os.umask(self.__pg_mode_mask)
-        except Exception as e:
-            logger.error('Can not set umask to %03o: %r', self.__pg_mode_mask, e)
-            return 0o22
+proc dirCreateMode*(self: FilePermissions): Mode =
+  ## Directory permissions.
+  result = self.pgDirCreateMode
 
-    @property
-    def orig_umask(self) -> int:
-        """Original umask value."""
-        return self.__orig_umask
+proc fileCreateMode*(self: FilePermissions): Mode =
+  ## File permissions.
+  result = self.pgFileCreateMode
 
-    def __set_owner_permissions(self) -> None:
-        """Make directories/files accessible only by the owner."""
-        self.__pg_dir_create_mode = self.__PG_DIR_MODE_OWNER
-        self.__pg_file_create_mode = self.__PG_FILE_MODE_OWNER
-        self.__pg_mode_mask = self.__PG_MODE_MASK_OWNER
-
-    def __set_group_permissions(self) -> None:
-        """Make directories/files accessible by the owner and readable by group."""
-        self.__pg_dir_create_mode = self.__PG_DIR_MODE_GROUP
-        self.__pg_file_create_mode = self.__PG_FILE_MODE_GROUP
-        self.__pg_mode_mask = self.__PG_MODE_MASK_GROUP
-
-    def set_permissions_from_data_directory(self, data_dir: str) -> None:
-        """Set new permissions based on provided *data_dir*.
-
-        :param data_dir: reference to PGDATA to calculate permissions from.
-        """
-        try:
-            st = os.stat(data_dir)
-            if (st.st_mode & self.__PG_DIR_MODE_GROUP) == self.__PG_DIR_MODE_GROUP:
-                self.__set_group_permissions()
-            else:
-                self.__set_owner_permissions()
-        except Exception as e:
-            logger.error('Can not check permissions on %s: %r', data_dir, e)
-        else:
-            self.__set_umask()
-
-    @property
-    def dir_create_mode(self) -> int:
-        """Directory permissions."""
-        return self.__pg_dir_create_mode
-
-    @property
-    def file_create_mode(self) -> int:
-        """File permissions."""
-        return self.__pg_file_create_mode
-
-
-pg_perm = __FilePermissions()
+# Global instance
+var pgPerm* = newFilePermissions()

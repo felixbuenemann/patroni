@@ -1,194 +1,218 @@
-"""Daemon processes abstraction module.
+## Daemon processes abstraction module.
+##
+## This module implements abstraction classes and functions for creating and managing daemon processes in Patroni.
+## Currently it is only used for the main "Thread" of ``patroni`` and ``patroni_raft_controller`` commands.
 
-This module implements abstraction classes and functions for creating and managing daemon processes in Patroni.
-Currently it is only used for the main "Thread" of ``patroni`` and ``patroni_raft_controller`` commands.
-"""
-import abc
-import argparse
-import logging
-import os
-import signal
-import sys
+import std/[os, locks, strformat, parseopt]
+import ./config
+import ./exceptions
+import ./log
+import ./version
 
-from threading import Lock
-from typing import Any, Optional, Type, TYPE_CHECKING
+let logger = getLogger("patroni.daemon")
 
-if TYPE_CHECKING:  # pragma: no cover
-    from .config import Config
+# Systemd notification support
+when defined(linux):
+  proc sd_notify(unset_environment: cint, state: cstring): cint {.importc, header: "<systemd/sd-daemon.h>", dynlib: "libsystemd.so".}
 
-logger = logging.getLogger(__name__)
+  proc notifySystemd*(msg: string) =
+    ## Notify systemd of daemon state.
+    discard sd_notify(0, msg.cstring)
+else:
+  proc notifySystemd*(msg: string) =
+    ## Stub for non-Linux systems.
+    discard
 
-try:  # pragma: no cover
-    from systemd import daemon  # pyright: ignore
+# Signal handling
+var
+  receivedSighup* {.threadvar.}: bool
+  receivedSigterm* {.threadvar.}: bool
+  sigtermLock*: Lock
 
-    def notify_systemd(msg: str) -> None:
-        daemon.notify(msg)  # pyright: ignore
+proc sighupHandler(sig: cint) {.noconv.} =
+  ## Handle SIGHUP signals.
+  receivedSighup = true
+  notifySystemd("RELOADING=1")
 
-except ImportError:  # pragma: no cover
-    logger.info("Systemd integration is not supported")
+proc sigtermHandler(sig: cint) {.noconv.} =
+  ## Handle SIGTERM signals.
+  withLock(sigtermLock):
+    if not receivedSigterm:
+      receivedSigterm = true
+      quit(0)
 
-    def notify_systemd(msg: str) -> None:
-        pass
+proc setupSignalHandlers*() =
+  ## Set up daemon signal handlers.
+  ##
+  ## Set up SIGHUP and SIGTERM signal handlers.
+  ##
+  ## .. note::
+  ##     SIGHUP is only handled in non-Windows environments.
+  receivedSighup = false
+  receivedSigterm = false
+  initLock(sigtermLock)
 
+  when defined(posix):
+    import std/posix
+    var sa: Sigaction
+    sa.sa_handler = sighupHandler
+    discard sigemptyset(sa.sa_mask)
+    sa.sa_flags = 0
+    discard sigaction(SIGHUP, sa, nil)
 
-def get_base_arg_parser() -> argparse.ArgumentParser:
-    """Create a basic argument parser with the arguments used for both patroni and raft controller daemon.
+    sa.sa_handler = sigtermHandler
+    discard sigaction(SIGTERM, sa, nil)
 
-    :returns: 'argparse.ArgumentParser' object
-    """
-    from .config import Config
-    from .version import __version__
+proc getBaseArgParser*(): tuple[configFile: string, showVersion: bool, showHelp: bool] =
+  ## Create a basic argument parser with the arguments used for both patroni and raft controller daemon.
+  ##
+  ## :returns: parsed arguments tuple
+  var p = initOptParser()
+  result.configFile = ""
+  result.showVersion = false
+  result.showHelp = false
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--version', action='version', version='%(prog)s {0}'.format(__version__))
-    parser.add_argument('configfile', nargs='?', default='',
-                        help='Patroni may also read the configuration from the {0} environment variable'
-                        .format(Config.PATRONI_CONFIG_VARIABLE))
-    return parser
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdShortOption, cmdLongOption:
+      case p.key
+      of "version", "v":
+        result.showVersion = true
+      of "help", "h":
+        result.showHelp = true
+      else:
+        discard
+    of cmdArgument:
+      result.configFile = p.key
 
+type
+  AbstractPatroniDaemon* = ref object of RootObj
+    ## A Patroni daemon process.
+    ##
+    ## .. note::
+    ##     When inheriting from AbstractPatroniDaemon you are expected to define the methods runCycle
+    ##     to determine what it should do in each execution cycle, and shutdown to determine what it should do
+    ##     when shutting down.
+    ##
+    ## :ivar patroniLogger: log handler used by this daemon.
+    ## :ivar config: configuration options for this daemon.
+    patroniLogger*: PatroniLogger
+    config*: Config
+    receivedSighup: bool
+    receivedSigterm: bool
+    sigtermLock: Lock
 
-class AbstractPatroniDaemon(abc.ABC):
-    """A Patroni daemon process.
+proc apiSigterm*(self: AbstractPatroniDaemon): bool =
+  ## Guarantee only a single SIGTERM is being processed.
+  ##
+  ## Flag the daemon as "SIGTERM received" with a lock-based approach.
+  ##
+  ## :returns: true if the daemon was flagged as "SIGTERM received".
+  result = false
+  withLock(self.sigtermLock):
+    if not self.receivedSigterm:
+      self.receivedSigterm = true
+      result = true
 
-    .. note::
+proc isReceivedSigterm*(self: AbstractPatroniDaemon): bool =
+  ## If daemon was signaled with SIGTERM.
+  withLock(self.sigtermLock):
+    result = self.receivedSigterm
 
-        When inheriting from :class:`AbstractPatroniDaemon` you are expected to define the methods :func:`_run_cycle`
-        to determine what it should do in each execution cycle, and :func:`_shutdown` to determine what it should do
-        when shutting down.
+method runCycle*(self: AbstractPatroniDaemon) {.base.} =
+  ## Define what the daemon should do in each execution cycle.
+  ##
+  ## Keep being called in the daemon's main loop until the daemon is eventually terminated.
+  raise newException(NotImplementedError, "runCycle must be implemented")
 
-    :ivar logger: log handler used by this daemon.
-    :ivar config: configuration options for this daemon.
-    """
+method shutdownInternal*(self: AbstractPatroniDaemon) {.base.} =
+  ## Define what the daemon should do when shutting down.
+  raise newException(NotImplementedError, "shutdownInternal must be implemented")
 
-    def __init__(self, config: 'Config') -> None:
-        """Set up signal handlers, logging handler and configuration.
+method reloadConfig*(self: AbstractPatroniDaemon, sighup: bool = false, local: bool = false) {.base.} =
+  ## Reload configuration.
+  ##
+  ## :param sighup: if it is related to a SIGHUP signal.
+  ##                The sighup parameter could be used in the method overridden in a child class.
+  ## :param local: will be true if there are changes in the local configuration file.
+  if local:
+    let logConfig = self.config.get("log")
+    self.patroniLogger.reloadConfig(logConfig)
 
-        :param config: configuration options for this daemon.
-        """
-        from patroni.log import PatroniLogger
+proc initAbstractPatroniDaemon*(self: AbstractPatroniDaemon, config: Config) =
+  ## Set up signal handlers, logging handler and configuration.
+  ##
+  ## :param config: configuration options for this daemon.
+  self.receivedSighup = false
+  self.receivedSigterm = false
+  initLock(self.sigtermLock)
 
-        self.setup_signal_handlers()
+  setupSignalHandlers()
 
-        self.logger = PatroniLogger()
-        self.config = config
-        AbstractPatroniDaemon.reload_config(self, local=True)
+  self.patroniLogger = newPatroniLogger()
+  self.config = config
+  self.reloadConfig(local = true)
 
-    def sighup_handler(self, *_: Any) -> None:
-        """Handle SIGHUP signals.
+proc run*(self: AbstractPatroniDaemon) =
+  ## Run the daemon process.
+  ##
+  ## Start the logger thread and keep running execution cycles until a SIGTERM is eventually received. Also reload
+  ## configuration upon receiving SIGHUP.
+  notifySystemd("READY=1")
+  self.patroniLogger.start()
 
-        Flag the daemon as "SIGHUP received".
-        """
-        self._received_sighup = True
-        notify_systemd("RELOADING=1")
+  while not self.isReceivedSigterm():
+    if self.receivedSighup:
+      self.receivedSighup = false
+      let localChanged = self.config.reloadLocalConfiguration()
+      self.reloadConfig(sighup = true, local = localChanged)
+      notifySystemd("READY=1")
 
-    def api_sigterm(self) -> bool:
-        """Guarantee only a single SIGTERM is being processed.
+    self.runCycle()
 
-        Flag the daemon as "SIGTERM received" with a lock-based approach.
+proc shutdown*(self: AbstractPatroniDaemon) =
+  ## Shut the daemon down when a SIGTERM is received.
+  ##
+  ## Shut down the daemon process and the logger thread.
+  withLock(self.sigtermLock):
+    self.receivedSigterm = true
+  self.shutdownInternal()
+  self.patroniLogger.shutdown()
 
-        :returns: ``True`` if the daemon was flagged as "SIGTERM received".
-        """
-        ret = False
-        with self._sigterm_lock:
-            if not self._received_sigterm:
-                self._received_sigterm = True
-                ret = True
-        return ret
+proc abstractMain*[T: AbstractPatroniDaemon](createDaemon: proc(config: Config): T, configFile: string) =
+  ## Create the main entry point of a given daemon process.
+  ##
+  ## :param createDaemon: a proc that creates a daemon instance from config.
+  ## :param configFile: path to configuration file.
+  var config: Config
+  try:
+    config = newConfig(configFile)
+  except ConfigParseError as e:
+    echo fmt"Configuration error: {e.msg}"
+    quit(1)
 
-    def sigterm_handler(self, *_: Any) -> None:
-        """Handle SIGTERM signals.
+  let controller = createDaemon(config)
+  try:
+    controller.run()
+  except CatchableError:
+    discard
+  finally:
+    controller.shutdown()
 
-        Terminate the daemon process through :func:`api_sigterm`.
-        """
-        if self.api_sigterm():
-            sys.exit()
+proc showVersion*() =
+  ## Display version information.
+  echo fmt"patroni {VERSION}"
 
-    def setup_signal_handlers(self) -> None:
-        """Set up daemon signal handlers.
-
-        Set up SIGHUP and SIGTERM signal handlers.
-
-        .. note::
-
-            SIGHUP is only handled in non-Windows environments.
-        """
-        self._received_sighup = False
-        self._sigterm_lock = Lock()
-        self._received_sigterm = False
-        if os.name != 'nt':
-            signal.signal(signal.SIGHUP, self.sighup_handler)
-        signal.signal(signal.SIGTERM, self.sigterm_handler)
-
-    @property
-    def received_sigterm(self) -> bool:
-        """If daemon was signaled with SIGTERM."""
-        with self._sigterm_lock:
-            return self._received_sigterm
-
-    def reload_config(self, sighup: bool = False, local: Optional[bool] = False) -> None:
-        """Reload configuration.
-
-        :param sighup: if it is related to a SIGHUP signal.
-                       The sighup parameter could be used in the method overridden in a child class.
-        :param local: will be ``True`` if there are changes in the local configuration file.
-        """
-        if local:
-            self.logger.reload_config(self.config.get('log', {}))
-
-    @abc.abstractmethod
-    def _run_cycle(self) -> None:
-        """Define what the daemon should do in each execution cycle.
-
-        Keep being called in the daemon's main loop until the daemon is eventually terminated.
-        """
-
-    def run(self) -> None:
-        """Run the daemon process.
-
-        Start the logger thread and keep running execution cycles until a SIGTERM is eventually received. Also reload
-        configuration upon receiving SIGHUP.
-        """
-        notify_systemd("READY=1")
-        self.logger.start()
-        while not self.received_sigterm:
-            if self._received_sighup:
-                self._received_sighup = False
-                self.reload_config(True, self.config.reload_local_configuration())
-                notify_systemd("READY=1")
-
-            self._run_cycle()
-
-    @abc.abstractmethod
-    def _shutdown(self) -> None:
-        """Define what the daemon should do when shutting down."""
-
-    def shutdown(self) -> None:
-        """Shut the daemon down when a SIGTERM is received.
-
-        Shut down the daemon process and the logger thread.
-        """
-        with self._sigterm_lock:
-            self._received_sigterm = True
-        self._shutdown()
-        self.logger.shutdown()
-
-
-def abstract_main(cls: Type[AbstractPatroniDaemon], configfile: str) -> None:
-    """Create the main entry point of a given daemon process.
-
-    :param cls: a class that should inherit from :class:`AbstractPatroniDaemon`.
-    :param configfile:
-    """
-    from .config import Config, ConfigParseError
-    try:
-        config = Config(configfile)
-    except ConfigParseError as e:
-        sys.exit(e.value)
-
-    controller = cls(config)
-    try:
-        controller.run()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        controller.shutdown()
+proc showHelp*() =
+  ## Display help information.
+  echo "Usage: patroni [OPTIONS] [CONFIGFILE]"
+  echo ""
+  echo "Arguments:"
+  echo "  CONFIGFILE    Path to Patroni configuration file"
+  echo "                (may also use PATRONI_CONFIGURATION env variable)"
+  echo ""
+  echo "Options:"
+  echo "  --version, -v    Show version and exit"
+  echo "  --help, -h       Show this help and exit"

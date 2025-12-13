@@ -506,3 +506,168 @@ method watch*(self: AbstractDCS, leader: Option[Leader], timeout: float): bool {
 method reloadConfig*(self: AbstractDCS, config: Table[string, JsonNode]) {.base.} =
   ## Reload configuration.
   discard
+
+# Helper procs for creating objects from DCS nodes
+
+proc clusterConfigFromNode*(modifyIndex: int64, value: string): ClusterConfig =
+  ## Create ClusterConfig from node value.
+  result = newClusterConfig()
+  result.modifyVersion = int(modifyIndex)
+  try:
+    let jsonData = parseJson(value)
+    if jsonData.kind == JObject:
+      for key, val in jsonData.pairs:
+        result.data[key] = val
+  except JsonParsingError:
+    discard
+
+proc timelineHistoryFromNode*(modifyIndex: int64, value: string): TimelineHistory =
+  ## Create TimelineHistory from node value.
+  new(result)
+  result.filename = ""
+  result.content = value
+
+proc statusFromNode*(value: string): Status =
+  ## Create Status from node value.
+  result = newStatus()
+  try:
+    let jsonData = parseJson(value)
+    if jsonData.kind == JObject:
+      if jsonData.hasKey("optime"):
+        result.lastLsn = jsonData["optime"].getInt(0)
+      if jsonData.hasKey("slots") and jsonData["slots"].kind == JObject:
+        for key, val in jsonData["slots"].pairs:
+          result.slots[key] = val.getInt(0)
+  except JsonParsingError:
+    # Try parsing as just an integer (legacy format)
+    try:
+      result.lastLsn = parseInt(value)
+    except ValueError:
+      discard
+
+proc failoverFromNode*(modifyIndex: int64, value: string): Failover =
+  ## Create Failover from node value.
+  result = newFailover()
+  result.version = int(modifyIndex)
+  try:
+    let jsonData = parseJson(value)
+    if jsonData.kind == JObject:
+      if jsonData.hasKey("leader"):
+        result.leader = jsonData["leader"].getStr("")
+      if jsonData.hasKey("candidate"):
+        result.candidate = jsonData["candidate"].getStr("")
+      if jsonData.hasKey("scheduled_at"):
+        let dt = jsonData["scheduled_at"].getStr("")
+        if dt.len > 0:
+          try:
+            result.scheduledAt = some(parse(dt, "yyyy-MM-dd'T'HH:mm:ss"))
+          except TimeParseError:
+            discard
+  except JsonParsingError:
+    discard
+
+proc syncStateFromNode*(modifyIndex: int64, value: string): SyncState =
+  ## Create SyncState from node value.
+  result = newSyncState()
+  result.version = int(modifyIndex)
+  try:
+    let jsonData = parseJson(value)
+    if jsonData.kind == JObject:
+      if jsonData.hasKey("leader"):
+        result.leader = jsonData["leader"].getStr("")
+      if jsonData.hasKey("sync_standby") and jsonData["sync_standby"].kind == JArray:
+        for item in jsonData["sync_standby"]:
+          result.syncStandby.add(item.getStr(""))
+      if jsonData.hasKey("quorum"):
+        result.quorum = jsonData["quorum"].getInt(0)
+  except JsonParsingError:
+    discard
+
+proc emptyCluster*(): Cluster =
+  ## Return an empty cluster.
+  result = newCluster()
+
+# Additional AbstractDCS methods and properties
+
+proc initAbstractDCS*(self: AbstractDCS, config: JsonNode) =
+  ## Initialize AbstractDCS from JSON config.
+  self.config = initTable[string, JsonNode]()
+  if config.kind == JObject:
+    for key, val in config.pairs:
+      self.config[key] = val
+
+  self.scopeVal = ""
+  self.namespaceVal = "/service"
+  self.memberName = ""
+  self.loopWaitVal = 10
+  self.ttlVal = 30
+  self.retryTimeoutVal = 10
+  self.cluster = nil
+  self.event = false
+  initLock(self.lock)
+  self.mpp = nil
+
+  if self.config.hasKey("scope"):
+    self.scopeVal = self.config["scope"].getStr("")
+  if self.config.hasKey("namespace"):
+    self.namespaceVal = self.config["namespace"].getStr("/service")
+  if self.config.hasKey("name"):
+    self.memberName = self.config["name"].getStr("")
+  if self.config.hasKey("loop_wait"):
+    self.loopWaitVal = self.config["loop_wait"].getInt(10)
+  if self.config.hasKey("ttl"):
+    self.ttlVal = self.config["ttl"].getInt(30)
+  if self.config.hasKey("retry_timeout"):
+    self.retryTimeoutVal = self.config["retry_timeout"].getInt(10)
+
+proc name*(self: AbstractDCS): string =
+  ## Get the member name.
+  result = self.memberName
+
+proc isCtl*(self: AbstractDCS): bool =
+  ## Check if running in ctl mode.
+  result = false  # Would be set based on context
+
+proc clientPath*(self: AbstractDCS, path: string): string =
+  ## Get the full DCS path for a key.
+  result = self.namespaceVal & "/" & self.scopeVal & "/" & path
+
+proc memberPath*(self: AbstractDCS): string =
+  ## Get the path for this member's key.
+  result = self.clientPath("members/" & self.memberName)
+
+proc leaderPath*(self: AbstractDCS): string =
+  ## Get the path for the leader key.
+  result = self.clientPath("leader")
+
+proc leaderOptimePath*(self: AbstractDCS): string =
+  ## Get the path for the leader optime key.
+  result = self.clientPath("optime/leader")
+
+proc statusPath*(self: AbstractDCS): string =
+  ## Get the path for the status key.
+  result = self.clientPath("status")
+
+proc configPath*(self: AbstractDCS): string =
+  ## Get the path for the config key.
+  result = self.clientPath("config")
+
+proc initializePath*(self: AbstractDCS): string =
+  ## Get the path for the initialize key.
+  result = self.clientPath("initialize")
+
+proc failoverPath*(self: AbstractDCS): string =
+  ## Get the path for the failover key.
+  result = self.clientPath("failover")
+
+proc historyPath*(self: AbstractDCS): string =
+  ## Get the path for the history key.
+  result = self.clientPath("history")
+
+proc syncPath*(self: AbstractDCS): string =
+  ## Get the path for the sync key.
+  result = self.clientPath("sync")
+
+proc failsafePath*(self: AbstractDCS): string =
+  ## Get the path for the failsafe key.
+  result = self.clientPath("failsafe")
