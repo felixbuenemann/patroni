@@ -2,7 +2,7 @@
 
 import std/[os, json, strutils, tables, options, strformat]
 import ./collections
-import ./dcs
+import ./dcs/dcs
 import ./exceptions
 import ./log
 import ./utils
@@ -304,10 +304,9 @@ proc getInt*(self: Config, key: string, default: int = 0): int =
     case value.kind
     of JInt: result = value.getInt()
     of JString:
-      let parsed = parseInt(value.getStr())
-      if parsed.isSome:
-        result = parsed.get()
-      else:
+      try:
+        result = parseInt(value.getStr())
+      except ValueError:
         result = default
     else: result = default
   else:
@@ -334,7 +333,9 @@ proc loadCache(self: Config) =
       if parsed.kind == JObject:
         for key, value in parsed.pairs:
           self.dynamicConfiguration[key] = value
-    except IOError, JsonParsingError as e:
+    except IOError as e:
+      logger.exception(fmt"Exception when loading file: {self.cacheFile}", e)
+    except JsonParsingError as e:
       logger.exception(fmt"Exception when loading file: {self.cacheFile}", e)
 
 proc saveCache*(self: Config) =
@@ -407,7 +408,7 @@ proc setDynamicConfiguration*(self: Config, configuration: Table[string, JsonNod
       logger.exception("Exception when setting dynamic_configuration", e)
   return false
 
-proc setDynamicConfiguration*(self: Config, configuration: ClusterConfig): bool =
+proc setDynamicConfiguration*(self: Config, configuration: dcs.ClusterConfig): bool =
   ## Set dynamic configuration from ClusterConfig.
   if self.modifyVersion == configuration.modifyVersion:
     return false

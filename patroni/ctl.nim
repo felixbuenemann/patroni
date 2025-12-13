@@ -7,7 +7,7 @@
 
 import std/[os, json, strutils, strformat, tables, times, options, terminal, parseopt]
 import ./config
-import ./dcs
+import ./dcs/dcs
 import ./exceptions
 import ./request
 import ./utils
@@ -98,7 +98,7 @@ proc printTable*(headers: seq[string], rows: seq[seq[string]], title: string = "
 
   echo sepLine
 
-proc getClusterMembers*(ctl: PatroniCtl, cluster: Cluster): seq[seq[string]] =
+proc getClusterMembers*(ctl: PatroniCtl, cluster: dcs.Cluster): seq[seq[string]] =
   ## Get cluster members as table rows.
   result = @[]
   for member in cluster.members:
@@ -267,7 +267,7 @@ proc printHelp*() =
 
 proc printVersion*() =
   ## Print version.
-  echo fmt"patronictl version {version}"
+  echo fmt"patronictl version {patroniVersion}"
 
 proc main*(): int =
   ## Main entry point for patronictl.

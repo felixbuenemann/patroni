@@ -7,7 +7,7 @@
 
 import std/[asynchttpserver, asyncdispatch, json, strutils, tables, times, net, strformat, locks, options, uri]
 import ./config
-import ./dcs
+import ./dcs/dcs
 import ./exceptions
 import ./global_config
 import ./log
@@ -94,10 +94,9 @@ proc newRestApiServer*(config: Config): RestApiServer =
       if parts.len >= 1:
         result.listenAddress = parts[0]
       if parts.len >= 2:
-        let p = parseInt(parts[1])
-        if p.isSome:
-          result.port = p.get()
-        else:
+        try:
+          result.port = parseInt(parts[1])
+        except ValueError:
           result.port = 8008
 
     if "certfile" in restapiConfig:
@@ -288,7 +287,7 @@ proc start*(server: RestApiServer) {.async.} =
   server.running = true
   logger.info(fmt"Starting REST API server on {server.listenAddress}:{server.port}")
 
-  proc callback(request: Request) {.async.} =
+  proc callback(request: Request) {.async, gcsafe.} =
     await server.serve(request)
 
   await server.server.serve(Port(server.port), callback, server.listenAddress)
@@ -337,7 +336,8 @@ proc parseUri*(s: string): tuple[scheme: string, host: string, port: int, path: 
   let parsed = parseUri(s)
   var port = 0
   if parsed.port.len > 0:
-    let p = parseInt(parsed.port)
-    if p.isSome:
-      port = p.get()
+    try:
+      port = parseInt(parsed.port)
+    except ValueError:
+      discard
   result = (parsed.scheme, parsed.hostname, port, parsed.path)

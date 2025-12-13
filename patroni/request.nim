@@ -1,6 +1,6 @@
 ## Facilities for handling communication with Patroni's REST API.
 
-import std/[httpclient, json, options, strutils, tables, net, uri]
+import std/[httpclient, json, options, strutils, tables, net, uri, base64]
 import ./utils
 
 type
