@@ -119,6 +119,69 @@ proc issubset*(self, other: CaseInsensitiveSet): bool =
 proc `<=`*(self, other: CaseInsensitiveSet): bool =
   result = self.issubset(other)
 
+proc isSubsetOf*(self, other: CaseInsensitiveSet): bool =
+  ## Check if this set is a subset of other.
+  ##
+  ## :param other: another set to be compared with this set.
+  ## :returns: true if this set is a subset of other, else false.
+  result = self.issubset(other)
+
+proc isProperSubsetOf*(self, other: CaseInsensitiveSet): bool =
+  ## Check if this set is a proper subset of other (subset but not equal).
+  ##
+  ## :param other: another set to be compared with this set.
+  ## :returns: true if this set is a proper subset of other, else false.
+  result = self.len < other.len and self.issubset(other)
+
+proc `==`*(self, other: CaseInsensitiveSet): bool =
+  ## Check if two sets are equal.
+  ##
+  ## :param other: another set to be compared with this set.
+  ## :returns: true if sets contain the same values, else false.
+  if self.len != other.len:
+    return false
+  for key in self.values.keys:
+    if key notin other.values:
+      return false
+  result = true
+
+proc union*(self, other: CaseInsensitiveSet): CaseInsensitiveSet =
+  ## Return a new set containing all elements from both sets.
+  ##
+  ## :param other: another set to union with this set.
+  ## :returns: a new set containing all elements from both sets.
+  result = newCaseInsensitiveSet()
+  for v in self.values.values:
+    result.values[v.toLowerAscii()] = v
+  for v in other.values.values:
+    result.values[v.toLowerAscii()] = v
+
+proc intersection*(self, other: CaseInsensitiveSet): CaseInsensitiveSet =
+  ## Return a new set containing elements common to both sets.
+  ##
+  ## :param other: another set to intersect with this set.
+  ## :returns: a new set containing common elements.
+  result = newCaseInsensitiveSet()
+  for key, v in self.values.pairs:
+    if key in other.values:
+      result.values[key] = v
+
+proc difference*(self, other: CaseInsensitiveSet): CaseInsensitiveSet =
+  ## Return a new set containing elements in this set but not in other.
+  ##
+  ## :param other: another set to subtract from this set.
+  ## :returns: a new set containing elements in self but not in other.
+  result = newCaseInsensitiveSet()
+  for key, v in self.values.pairs:
+    if key notin other.values:
+      result.values[key] = v
+
+proc toSeq*(self: CaseInsensitiveSet): seq[string] =
+  ## Convert set to sequence of values.
+  result = @[]
+  for v in self.values.values:
+    result.add(v)
+
 # CaseInsensitiveDict implementation
 
 proc newCaseInsensitiveDict*[V](data: openArray[(string, V)] = []): CaseInsensitiveDict[V] =
