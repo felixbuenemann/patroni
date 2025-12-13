@@ -421,16 +421,35 @@ iterator pollingLoop*(timeout: float, interval: float = 1.0): float =
 
 proc splitAddress*(address: string): tuple[host: string, port: int] =
   ## Split host:port string into components.
-  let parts = address.rsplit(':', maxsplit = 1)
-  if parts.len == 2:
-    result.host = parts[0]
-    try:
-      result.port = strutils.parseInt(parts[1])
-    except:
+  ## Handles IPv6 addresses in brackets like [::1]:5432
+  if address.startsWith("["):
+    # IPv6 address in brackets
+    let closeBracket = address.find(']')
+    if closeBracket > 0:
+      result.host = address[1 ..< closeBracket]  # Remove brackets
+      if closeBracket + 1 < address.len and address[closeBracket + 1] == ':':
+        try:
+          result.port = strutils.parseInt(address[closeBracket + 2 .. ^1])
+        except:
+          result.port = 0
+      else:
+        result.port = 0
+    else:
+      # Malformed, return as-is
+      result.host = address
       result.port = 0
   else:
-    result.host = address
-    result.port = 0
+    # IPv4 or hostname
+    let parts = address.rsplit(':', maxsplit = 1)
+    if parts.len == 2:
+      result.host = parts[0]
+      try:
+        result.port = strutils.parseInt(parts[1])
+      except:
+        result.port = 0
+    else:
+      result.host = address
+      result.port = 0
 
 proc enableKeepAlive*(sock: Socket, keepaliveIdle: int = 10, keepaliveIntvl: int = 3, keepaliveCnt: int = 3) =
   ## Enable TCP keepalive on a socket.
@@ -468,7 +487,15 @@ proc sleepSec*(sec: float) =
 
 proc getHostname*(): string =
   ## Get the hostname of the current machine.
-  result = getHostname()
+  when defined(posix):
+    var hostname: array[256, char]
+    if posix.gethostname(cast[cstring](addr hostname[0]), 256) == 0:
+      result = $cast[cstring](addr hostname[0])
+    else:
+      result = "localhost"
+  else:
+    # Windows fallback
+    result = "localhost"
 
 proc randomShuffle*[T](s: var seq[T]) =
   ## Shuffle a sequence in place.

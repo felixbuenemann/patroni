@@ -69,16 +69,15 @@ suite "Split Address":
     check host == "127.0.0.1"
     check port == 5432
 
-  # Note: IPv6 parsing needs to be fixed in splitAddress
-  # test "splitAddress IPv6 with port":
-  #   let (host, port) = splitAddress("[::1]:5432")
-  #   check host == "::1"
-  #   check port == 5432
-  #
-  # test "splitAddress IPv6 without port":
-  #   let (host, port) = splitAddress("[::1]")
-  #   check host == "::1"
-  #   check port == 0
+  test "splitAddress IPv6 with port":
+    let (host, port) = splitAddress("[::1]:5432")
+    check host == "::1"
+    check port == 5432
+
+  test "splitAddress IPv6 without port":
+    let (host, port) = splitAddress("[::1]")
+    check host == "::1"
+    check port == 0
 
 suite "URI Builder":
   test "uri basic":
@@ -151,6 +150,10 @@ suite "Utility Functions":
   test "tzutc returns UTC timezone":
     let tz = tzutc()
     check "UTC" in tz.name  # Can be "UTC" or "Etc/UTC"
+
+  test "getHostname returns string":
+    let hostname = getHostname()
+    check hostname.len > 0
 
   test "isRunningAsRoot":
     # Just verify it doesn't crash
