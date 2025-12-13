@@ -9,9 +9,10 @@
 ## :var DBL_RE: regular expression to match double precision numbers, signed or unsigned. Matches scientific notation too.
 ## :var WHITESPACE_RE: regular expression to match whitespace characters
 
-import std/[strutils, strformat, tables, options, times, os, re, random, json, sequtils, algorithm, net, osproc, parseutils, math, httpclient]
+import std/[strutils, strformat, tables, options, times, os, re, random, json, algorithm, net, parseutils, math, httpclient]
+when defined(posix):
+  import posix
 
-import ./exceptions
 import ./version
 
 # Timezone UTC (Nim doesn't have timezone objects like Python, we use UTC functions)
@@ -167,7 +168,7 @@ proc patchConfig*(config: var JsonNode, data: JsonNode): bool =
       config[name] = value
       result = true
 
-proc parseBool*(value: string): bool =
+proc parseBoolValue*(value: string): bool =
   ## Parse a given value to a bool.
   ##
   ## .. note::
@@ -347,7 +348,7 @@ proc convertToBaseUnit*(value: float, unit: string, baseUnit: string): Option[fl
 
   result = none(float)
 
-proc parseInt*(value: string, baseUnit: string = ""): Option[int] =
+proc parseIntValue*(value: string, baseUnit: string = ""): Option[int] =
   ## Parse value as an int.
   ##
   ## :param value: any value that can be handled by strtol or strtod.
@@ -371,11 +372,7 @@ proc parseInt*(value: string, baseUnit: string = ""): Option[int] =
 
   result = none(int)
 
-proc parseInt*(value: string): Option[int] =
-  ## Parse value as an int without base unit conversion.
-  result = parseInt(value, "")
-
-proc parseReal*(value: string, baseUnit: string = ""): Option[float] =
+proc parseRealValue*(value: string, baseUnit: string = ""): Option[float] =
   ## Parse value as a float (real number).
   ##
   ## :param value: any value that can be handled by strtod.
@@ -441,19 +438,16 @@ proc enableKeepAlive*(sock: Socket, keepaliveIdle: int = 10, keepaliveIntvl: int
   # Note: Nim's standard library doesn't expose detailed keepalive options
   # These would need to be set via raw socket options
 
-proc isRunningAsRoot*(): bool =
-  ## Check if the process is running as root.
-  when defined(posix):
-    result = getuid() == 0
-  else:
-    result = false
-
 proc getuid*(): int =
   ## Get the current user ID (POSIX only).
   when defined(posix):
-    {.emit: "result = getuid();".}
+    result = int(posix.getuid())
   else:
     result = -1
+
+proc isRunningAsRoot*(): bool =
+  ## Check if the process is running as root.
+  result = getuid() == 0
 
 proc cluster_as_json*(cluster: pointer): JsonNode =
   ## Convert cluster to JSON representation.

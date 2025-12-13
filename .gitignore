@@ -70,3 +70,4 @@ data/
 
 # macOS
 **/.DS_Store
+patroni/main

@@ -2,7 +2,7 @@
 ##
 ## Implement ``patroni`` main daemon and expose its entry point.
 
-import std/[os, strutils, json, tables, parseopt, times, locks]
+import std/[os, json, tables, parseopt, times, locks, options]
 import ./version
 import ./exceptions
 import ./global_config
@@ -61,7 +61,7 @@ Arguments:
 """
 
 proc showVersion() =
-  echo "Patroni version ", version.version
+  echo "Patroni version ", version.patroniVersion
   echo "Nim version ", NimVersion
 
 proc showHelp() =
@@ -77,7 +77,7 @@ proc newPatroni*(config: Table[string, JsonNode]): Patroni =
   ## Get a connection to the DCS, configure watchdog (if required), set up Patroni interface
   ## with Postgres, configure the HA loop and bring the REST API up.
   new(result)
-  result.versionStr = version.version
+  result.versionStr = version.patroniVersion
   result.config = config
   result.dcs = nil
   result.watchdog = nil
@@ -275,7 +275,7 @@ tags:
     echo "Error: Configuration file not found: ", configFile
     quit(1)
 
-  echo "Starting Patroni ", version.version
+  echo "Starting Patroni ", version.patroniVersion
   echo "Configuration file: ", configFile
 
   if validateOnly:

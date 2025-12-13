@@ -2,7 +2,7 @@
 ##
 ## Provides a case insensitive dict and set object types, and EMPTY_DICT frozen dictionary object.
 
-import std/[tables, hashes, strutils, sequtils, algorithm]
+import std/[tables, hashes, strutils]
 
 type
   CaseInsensitiveSet* = ref object

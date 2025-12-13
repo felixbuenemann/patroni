@@ -1,6 +1,6 @@
 ## Tags handling.
 
-import std/[tables, options, strutils]
+import std/[tables, options]
 import ./utils
 
 type
@@ -49,7 +49,7 @@ proc clonefrom*(self: Tags): bool =
   ## ``True`` if ``clonefrom`` tag is ``True``, else ``False``.
   let tagsTable = self.tags
   if "clonefrom" in tagsTable:
-    result = parseBool(tagsTable["clonefrom"])
+    result = parseBoolValue(tagsTable["clonefrom"])
   else:
     result = false
 
@@ -70,11 +70,11 @@ proc priorityTag(self: Tags, boolName: string, priorityName: string): int =
 
   var priority = 1
   if priorityName in tagsTable:
-    let parsed = parseInt(tagsTable[priorityName])
+    let parsed = parseIntValue(tagsTable[priorityName])
     if parsed.isSome:
       priority = parsed.get()
 
-  if fromTags.isSome and parseBool(fromTags.get()):
+  if fromTags.isSome and parseBoolValue(fromTags.get()):
     result = 0
   else:
     result = priority
@@ -92,10 +92,10 @@ proc boolTag(self: Tags, boolName: string, priorityName: string): bool =
   let tagsTable = self.tags
   if boolName in tagsTable:
     # Value of bool tag takes precedence over priority tag
-    return parseBool(tagsTable[boolName])
+    return parseBoolValue(tagsTable[boolName])
 
   if priorityName in tagsTable:
-    let priority = parseInt(tagsTable[priorityName])
+    let priority = parseIntValue(tagsTable[priorityName])
     if priority.isSome:
       return priority.get() <= 0
 
@@ -113,7 +113,7 @@ proc noloadbalance*(self: Tags): bool =
   ## ``True`` if ``noloadbalance`` is ``True``, else ``False``.
   let tagsTable = self.tags
   if "noloadbalance" in tagsTable:
-    result = parseBool(tagsTable["noloadbalance"])
+    result = parseBoolValue(tagsTable["noloadbalance"])
   else:
     result = false
 
@@ -137,6 +137,6 @@ proc nostream*(self: Tags): bool =
   ## ``True`` if ``nostream`` is ``True``, else ``False``.
   let tagsTable = self.tags
   if "nostream" in tagsTable:
-    result = parseBool(tagsTable["nostream"])
+    result = parseBoolValue(tagsTable["nostream"])
   else:
     result = false

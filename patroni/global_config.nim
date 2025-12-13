@@ -3,7 +3,6 @@
 ## The GlobalConfig object provides convenient methods to access/check configuration values.
 
 import std/[tables, json, options, strutils]
-import ./collections
 import ./utils
 
 type
@@ -98,7 +97,7 @@ proc checkMode*(self: GlobalConfig, mode: string): bool =
   of JBool:
     result = val.getBool()
   of JString:
-    result = parseBool(val.getStr())
+    result = parseBoolValue(val.getStr())
   of JInt:
     result = val.getInt() != 0
   else:
@@ -162,7 +161,7 @@ proc getInt*(self: GlobalConfig, name: string, default: int = 0, baseUnit: strin
   else:
     return default
 
-  let parsed = parseInt(strVal, baseUnit)
+  let parsed = parseIntValue(strVal, baseUnit)
   if parsed.isSome:
     result = parsed.get()
   else:

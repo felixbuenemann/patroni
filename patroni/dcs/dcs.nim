@@ -1,6 +1,6 @@
 ## Abstract classes for Distributed Configuration Store.
 
-import std/[tables, json, options, strutils, times, re, locks, uri, random, sequtils, strformat]
+import std/[tables, json, options, strutils, times, re, locks, uri, strformat, os]
 import ../global_config
 import ../exceptions
 import ../tags
@@ -244,7 +244,7 @@ proc connUrl*(self: Member): string =
   if self.data.connKwargs.len > 0:
     let host = self.data.connKwargs.getOrDefault("host", "localhost")
     let port = self.data.connKwargs.getOrDefault("port", "5432")
-    result = uri("postgresql", host, parseInt(port).get(5432))
+    result = uri("postgresql", host, parseIntValue(port).get(5432))
     self.data.connUrl = result
     return result
 
@@ -541,7 +541,7 @@ proc statusFromNode*(value: string): Status =
   except JsonParsingError:
     # Try parsing as just an integer (legacy format)
     try:
-      result.lastLsn = parseInt(value)
+      result.lastLsn = strutils.parseInt(value)
     except ValueError:
       discard
 
