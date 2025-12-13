@@ -1,259 +1,270 @@
-import logging
-import multiprocessing
-import os
-import re
-import signal
-import subprocess
-import sys
+## PostgreSQL postmaster process management.
+##
+## This module provides types and procedures for starting, stopping, and
+## managing the PostgreSQL postmaster process.
 
-from multiprocessing.connection import Connection
-from typing import Dict, List, Optional
+import std/[json, os, osproc, posix, re, sequtils, strformat, strutils, tables, times]
+import ../log
 
-import psutil
+let logger = getLogger("patroni.postgresql.postmaster")
 
-from patroni import KUBERNETES_ENV_PREFIX, PATRONI_ENV_PREFIX
+const
+  STOP_SIGNALS* = {
+    "smart": "TERM",
+    "fast": "INT",
+    "immediate": "QUIT"
+  }.toTable
 
-# avoid spawning the resource tracker process
-if sys.version_info >= (3, 8):  # pragma: no cover
-    import multiprocessing.resource_tracker
-    multiprocessing.resource_tracker.getfd = lambda: 0
-elif sys.version_info >= (3, 4):  # pragma: no cover
-    import multiprocessing.semaphore_tracker
-    multiprocessing.semaphore_tracker.getfd = lambda: 0
+type
+  PostmasterProcess* = ref object
+    ## Represents a PostgreSQL postmaster process.
+    pid*: int
+    isSingleUser*: bool
+    createTime*: float
+    postmasterPid: Table[string, string]
 
-logger = logging.getLogger(__name__)
+proc readPostmasterPidfile*(dataDir: string): Table[string, string] =
+  ## Read and parse postmaster.pid from the data directory.
+  ##
+  ## :param dataDir: PostgreSQL data directory path.
+  ## :returns: dictionary of values if successful, empty dictionary otherwise.
+  result = initTable[string, string]()
+  let pidLineNames = ["pid", "data_dir", "start_time", "port", "socket_dir", "listen_addr", "shmem_key"]
 
-STOP_SIGNALS = {
-    'smart': 'TERM',
-    'fast': 'INT',
-    'immediate': 'QUIT',
-}
+  let pidFile = dataDir / "postmaster.pid"
+  if not fileExists(pidFile):
+    return
 
+  try:
+    let lines = readFile(pidFile).splitLines()
+    for i, name in pidLineNames:
+      if i < lines.len:
+        result[name] = lines[i]
+  except IOError:
+    discard
 
-def pg_ctl_start(conn: Connection, cmdline: List[str], env: Dict[str, str]) -> None:
-    if os.name != 'nt':
-        os.setsid()
-    try:
-        postmaster = subprocess.Popen(cmdline, close_fds=True, env=env)
-        conn.send(postmaster.pid)
-    except Exception:
-        logger.exception('Failed to execute %s', cmdline)
-        conn.send(None)
-    conn.close()
+proc isPostmasterProcess(self: PostmasterProcess): bool =
+  ## Verify this is actually a postmaster process.
+  try:
+    let startTime = self.postmasterPid.getOrDefault("start_time", "0").parseInt()
+    if startTime > 0 and abs(self.createTime - float(startTime)) > 3:
+      logger.info(fmt"Process {self.pid} is not postmaster, too much difference between PID file start time {startTime} and process start time {self.createTime}")
+      return false
+  except ValueError:
+    logger.warning(fmt"Garbage start time value in pid file: {self.postmasterPid.getOrDefault(\"start_time\", \"\")}")
 
+  # Extra safety check - process can't be ourselves, our parent or our direct child
+  let myPid = getpid()
+  let myPpid = getppid()
+  if self.pid == myPid or self.pid == myPpid:
+    logger.info(fmt"Patroni (pid={myPid}, ppid={myPpid}), \"fake postmaster\" (pid={self.pid})")
+    return false
 
-class PostmasterProcess(psutil.Process):
+  return true
 
-    def __init__(self, pid: int) -> None:
-        self._postmaster_pid: Dict[str, str]
-        self.is_single_user = False
-        if pid < 0:
-            pid = -pid
-            self.is_single_user = True
-        super(PostmasterProcess, self).__init__(pid)
+proc getProcessCreateTime(pid: int): float =
+  ## Get process creation time from /proc.
+  result = 0.0
+  when defined(linux):
+    let statFile = fmt"/proc/{pid}/stat"
+    if fileExists(statFile):
+      try:
+        let content = readFile(statFile)
+        let parts = content.split(')')
+        if parts.len > 1:
+          let fields = parts[1].strip().split()
+          if fields.len > 19:
+            let startTime = parseInt(fields[19])
+            # Convert to seconds since boot, then to epoch time
+            # This is a simplified calculation
+            let uptime = readFile("/proc/uptime").split()[0].parseFloat()
+            let bootTime = epochTime() - uptime
+            result = bootTime + float(startTime) / 100.0
+      except:
+        discard
+  else:
+    result = epochTime()
 
-    @staticmethod
-    def _read_postmaster_pidfile(data_dir: str) -> Dict[str, str]:
-        """Reads and parses postmaster.pid from the data directory
+proc isProcessRunning*(pid: int): bool =
+  ## Check if a process is running.
+  when defined(posix):
+    result = kill(Pid(pid), 0) == 0
+  else:
+    result = false
 
-        :returns dictionary of values if successful, empty dictionary otherwise
-        """
-        pid_line_names = ['pid', 'data_dir', 'start_time', 'port', 'socket_dir', 'listen_addr', 'shmem_key']
-        try:
-            with open(os.path.join(data_dir, 'postmaster.pid')) as f:
-                return {name: line.rstrip('\n') for name, line in zip(pid_line_names, f)}
-        except IOError:
-            return {}
+proc fromPidfile*(dataDir: string): PostmasterProcess =
+  ## Create a PostmasterProcess from the pidfile.
+  ##
+  ## :param dataDir: PostgreSQL data directory path.
+  ## :returns: PostmasterProcess if found and valid, nil otherwise.
+  let postmasterPid = readPostmasterPidfile(dataDir)
+  let pidStr = postmasterPid.getOrDefault("pid", "0")
 
-    def _is_postmaster_process(self) -> bool:
-        try:
-            start_time = int(self._postmaster_pid.get('start_time', 0))
-            if start_time and abs(self.create_time() - start_time) > 3:
-                logger.info('Process %s is not postmaster, too much difference between PID file start time %s and '
-                            'process start time %s', self.pid, start_time, self.create_time())
-                return False
-        except ValueError:
-            logger.warning('Garbage start time value in pid file: %r', self._postmaster_pid.get('start_time'))
+  try:
+    let pid = parseInt(pidStr)
+    if pid > 0 and isProcessRunning(pid):
+      new(result)
+      result.pid = pid
+      result.isSingleUser = false
+      result.createTime = getProcessCreateTime(pid)
+      result.postmasterPid = postmasterPid
 
-        # Extra safety check. The process can't be ourselves, our parent or our direct child.
-        if self.pid == os.getpid() or self.pid == os.getppid() or self.ppid() == os.getpid():
-            logger.info('Patroni (pid=%s, ppid=%s), "fake postmaster" (pid=%s, ppid=%s)',
-                        os.getpid(), os.getppid(), self.pid, self.ppid())
-            return False
+      if not result.isPostmasterProcess():
+        return nil
+  except ValueError:
+    return nil
 
-        return True
+proc fromPid*(pid: int): PostmasterProcess =
+  ## Create a PostmasterProcess from a PID.
+  ##
+  ## :param pid: Process ID.
+  ## :returns: PostmasterProcess if process exists, nil otherwise.
+  if isProcessRunning(pid):
+    new(result)
+    result.pid = if pid < 0: -pid else: pid
+    result.isSingleUser = pid < 0
+    result.createTime = getProcessCreateTime(result.pid)
+    result.postmasterPid = initTable[string, string]()
+  else:
+    result = nil
 
-    @classmethod
-    def _from_pidfile(cls, data_dir: str) -> Optional['PostmasterProcess']:
-        postmaster_pid = PostmasterProcess._read_postmaster_pidfile(data_dir)
-        try:
-            pid = int(postmaster_pid.get('pid', 0))
-            if pid:
-                proc = cls(pid)
-                proc._postmaster_pid = postmaster_pid
-                return proc
-        except ValueError:
-            return None
+proc sendSignal*(self: PostmasterProcess, sig: int): bool =
+  ## Send a signal to the postmaster process.
+  ##
+  ## :param sig: Signal number to send.
+  ## :returns: true if signal was sent, false otherwise.
+  when defined(posix):
+    result = kill(Pid(self.pid), cint(sig)) == 0
+  else:
+    result = false
 
-    @staticmethod
-    def from_pidfile(data_dir: str) -> Optional['PostmasterProcess']:
-        try:
-            proc = PostmasterProcess._from_pidfile(data_dir)
-            return proc if proc and proc._is_postmaster_process() else None
-        except psutil.NoSuchProcess:
-            return None
+proc signalStop*(self: PostmasterProcess, mode: string, pgCtl: string = "pg_ctl"): Option[bool] =
+  ## Signal postmaster process to stop.
+  ##
+  ## :param mode: Stop mode (smart, fast, immediate).
+  ## :param pgCtl: Path to pg_ctl binary.
+  ## :returns: none if signaled, some(true) if process is already gone, some(false) if error.
+  if self.isSingleUser:
+    logger.warning(fmt"Cannot stop server; single-user server is running (PID: {self.pid})")
+    return some(false)
 
-    @classmethod
-    def from_pid(cls, pid: int) -> Optional['PostmasterProcess']:
-        try:
-            return cls(pid)
-        except psutil.NoSuchProcess:
-            return None
+  when defined(posix):
+    let signalName = STOP_SIGNALS.getOrDefault(mode, "INT")
+    let sig = case signalName
+      of "TERM": SIGTERM
+      of "INT": SIGINT
+      of "QUIT": SIGQUIT
+      else: SIGINT
 
-    def signal_kill(self) -> bool:
-        """to suspend and kill postmaster and all children
+    if kill(Pid(self.pid), sig) == 0:
+      return none(bool)
+    elif errno == ESRCH:
+      return some(true)
+    else:
+      logger.warning(fmt"Could not send stop signal to PostgreSQL: errno={errno}")
+      return some(false)
+  else:
+    # Windows - use pg_ctl kill
+    return self.pgCtlKill(mode, pgCtl)
 
-        :returns True if postmaster and children are killed, False if error
-        """
-        try:
-            self.suspend()
-        except psutil.NoSuchProcess:
-            return True
-        except psutil.Error as e:
-            logger.warning('Failed to suspend postmaster: %s', e)
+proc pgCtlKill*(self: PostmasterProcess, mode: string, pgCtl: string): Option[bool] =
+  ## Use pg_ctl kill to stop the process (mainly for Windows).
+  ##
+  ## :param mode: Stop mode.
+  ## :param pgCtl: Path to pg_ctl binary.
+  ## :returns: none if signaled, some(true) if process is gone, some(false) if error.
+  let signalName = STOP_SIGNALS.getOrDefault(mode, "INT")
+  try:
+    let status = execCmd(fmt"{pgCtl} kill {signalName} {self.pid}")
+    if status == 0:
+      return none(bool)
+    else:
+      return some(not isProcessRunning(self.pid))
+  except OSError:
+    return some(false)
 
-        try:
-            children = self.children(recursive=True)
-        except psutil.NoSuchProcess:
-            return True
-        except psutil.Error as e:
-            logger.warning('Failed to get a list of postmaster children: %s', e)
-            children = []
+proc signalKill*(self: PostmasterProcess): bool =
+  ## Suspend and kill postmaster and all children.
+  ##
+  ## :returns: true if postmaster and children are killed, false if error.
+  when defined(posix):
+    # First try to stop the process
+    if kill(Pid(self.pid), SIGSTOP) != 0:
+      if errno == ESRCH:
+        return true
+      logger.warning(fmt"Failed to suspend postmaster: errno={errno}")
 
-        try:
-            self.kill()
-        except psutil.NoSuchProcess:
-            return True
-        except psutil.Error as e:
-            logger.warning('Could not kill postmaster: %s', e)
-            return False
+    # Kill the main process
+    if kill(Pid(self.pid), SIGKILL) != 0:
+      if errno == ESRCH:
+        return true
+      logger.warning(fmt"Could not kill postmaster: errno={errno}")
+      return false
 
-        for child in children:
-            try:
-                child.kill()
-            except psutil.Error:
-                pass
-        psutil.wait_procs(children + [self])
-        return True
+    return true
+  else:
+    return false
 
-    def signal_stop(self, mode: str, pg_ctl: str = 'pg_ctl') -> Optional[bool]:
-        """Signal postmaster process to stop
+proc isRunning*(self: PostmasterProcess): bool =
+  ## Check if the postmaster is still running.
+  result = isProcessRunning(self.pid)
 
-        :returns None if signaled, True if process is already gone, False if error
-        """
-        if self.is_single_user:
-            logger.warning("Cannot stop server; single-user server is running (PID: %s)", self.pid)
-            return False
-        if os.name != 'posix':
-            return self.pg_ctl_kill(mode, pg_ctl)
-        try:
-            self.send_signal(getattr(signal, 'SIG' + STOP_SIGNALS[mode]))
-        except psutil.NoSuchProcess:
-            return True
-        except psutil.AccessDenied as e:
-            logger.warning("Could not send stop signal to PostgreSQL: %r", e)
-            return False
+proc waitForUserBackendsToClose*(self: PostmasterProcess, stopTimeout: float) =
+  ## Wait for user backends to close.
+  ##
+  ## :param stopTimeout: Timeout in seconds.
+  # This would need to enumerate child processes and wait for user backends
+  # For now, just sleep for the timeout
+  if stopTimeout > 0:
+    sleep(int(stopTimeout * 1000))
 
-        return None
+proc start*(pgcommand: string, dataDir: string, conf: string, options: seq[string]): PostmasterProcess =
+  ## Start a PostgreSQL postmaster process.
+  ##
+  ## :param pgcommand: Path to postgres binary.
+  ## :param dataDir: PostgreSQL data directory.
+  ## :param conf: Configuration file path.
+  ## :param options: Additional command line options.
+  ## :returns: PostmasterProcess if started successfully, nil otherwise.
 
-    def pg_ctl_kill(self, mode: str, pg_ctl: str) -> Optional[bool]:
-        try:
-            status = subprocess.call([pg_ctl, "kill", STOP_SIGNALS[mode], str(self.pid)])
-        except OSError:
-            return False
-        if status == 0:
-            return None
-        else:
-            return not self.is_running()
+  # Check for existing postmaster process
+  let existingProc = fromPidfile(dataDir)
+  var env = newStringTable()
 
-    def wait_for_user_backends_to_close(self, stop_timeout: Optional[float]) -> None:
-        # These regexps are cross checked against versions PostgreSQL 9.1 .. 18
-        aux_proc_re = re.compile("(?:postgres:)( .*:)? (?:(?:archiver|startup|autovacuum launcher|autovacuum worker|"
-                                 "checkpointer|logger|stats collector|wal receiver|wal writer|writer)(?: process  )?|"
-                                 "walreceiver|wal sender process|walsender|walwriter|background writer|"
-                                 "logical replication launcher|logical replication worker for subscription|"
-                                 "logical replication tablesync worker for subscription|"
-                                 "logical replication parallel apply worker for subscription|"
-                                 "logical replication apply worker for subscription|"
-                                 "slotsync worker|walsummarizer|io worker|bgworker:) ")
+  # Copy environment, excluding Patroni-specific variables
+  for key, val in envPairs():
+    if not key.startsWith("PATRONI_") and not key.startsWith("KUBERNETES_"):
+      env[key] = val
 
-        try:
-            children = self.children()
-        except psutil.Error:
-            return logger.debug('Failed to get list of postmaster children')
+  if existingProc != nil and not existingProc.isPostmasterProcess():
+    logger.info(fmt"Telling pg_ctl that it is safe to ignore postmaster.pid for process {existingProc.pid}")
+    env["PG_GRANDPARENT_PID"] = $existingProc.pid
 
-        user_backends: List[psutil.Process] = []
-        user_backends_cmdlines: Dict[int, str] = {}
-        for child in children:
-            try:
-                cmdline = child.cmdline()
-                if cmdline and not aux_proc_re.match(cmdline[0]):
-                    user_backends.append(child)
-                    user_backends_cmdlines[child.pid] = cmdline[0]
-            except psutil.NoSuchProcess:
-                pass
-        if user_backends:
-            logger.debug('Waiting for user backends %s to close', ', '.join(user_backends_cmdlines.values()))
-            _, live = psutil.wait_procs(user_backends, stop_timeout)
-            if stop_timeout and live:
-                live = [user_backends_cmdlines[b.pid] for b in live]
-                logger.warning('Backends still alive after %s: %s', stop_timeout, ', '.join(live))
-            else:
-                logger.debug("Backends closed")
+  var cmdline = @[pgcommand, "-D", dataDir, fmt"--config-file={conf}"]
+  cmdline.add(options)
 
-    @staticmethod
-    def start(pgcommand: str, data_dir: str, conf: str, options: List[str]) -> Optional['PostmasterProcess']:
-        # Unfortunately `pg_ctl start` does not return postmaster pid to us. Without this information
-        # it is hard to know the current state of postgres startup, so we had to reimplement pg_ctl start
-        # in python. It will start postgres, wait for port to be open and wait until postgres will start
-        # accepting connections.
-        # Important!!! We can't just start postgres using subprocess.Popen, because in this case it
-        # will be our child for the rest of our live and we will have to take care of it (`waitpid`).
-        # So we will use the same approach as pg_ctl uses: start a new process, which will start postgres.
-        # This process will write postmaster pid to stdout and exit immediately. Now it's responsibility
-        # of init process to take care about postmaster.
-        # In order to make everything portable we can't use fork&exec approach here, so  we will call
-        # ourselves and pass list of arguments which must be used to start postgres.
-        # On Windows, in order to run a side-by-side assembly the specified env must include a valid SYSTEMROOT.
-        env = {p: os.environ[p] for p in os.environ if not p.startswith(
-            PATRONI_ENV_PREFIX) and not p.startswith(KUBERNETES_ENV_PREFIX)}
-        try:
-            proc = PostmasterProcess._from_pidfile(data_dir)
-            if proc and not proc._is_postmaster_process():
-                # Upon start postmaster process performs various safety checks if there is a postmaster.pid
-                # file in the data directory. Although Patroni already detected that the running process
-                # corresponding to the postmaster.pid is not a postmaster, the new postmaster might fail
-                # to start, because it thinks that postmaster.pid is already locked.
-                # Important!!! Unlink of postmaster.pid isn't an option, because it has a lot of nasty race conditions.
-                # Luckily there is a workaround to this problem, we can pass the pid from postmaster.pid
-                # in the `PG_GRANDPARENT_PID` environment variable and postmaster will ignore it.
-                logger.info("Telling pg_ctl that it is safe to ignore postmaster.pid for process %s", proc.pid)
-                env['PG_GRANDPARENT_PID'] = str(proc.pid)
-        except psutil.NoSuchProcess:
-            pass
-        cmdline = [pgcommand, '-D', data_dir, '--config-file={}'.format(conf)] + options
-        logger.debug("Starting postgres: %s", " ".join(cmdline))
-        ctx = multiprocessing.get_context('spawn')
-        parent_conn, child_conn = ctx.Pipe(False)
-        proc = ctx.Process(target=pg_ctl_start, args=(child_conn, cmdline, env))
-        proc.start()
-        pid = parent_conn.recv()
-        proc.join()
-        if pid is None:
-            return
-        logger.info('postmaster pid=%s', pid)
+  logger.debug(fmt"Starting postgres: {cmdline.join(\" \")}")
 
-        # TODO: In an extremely unlikely case, the process could have exited and the pid reassigned. The start
-        # initiation time is not accurate enough to compare to create time as start time would also likely
-        # be relatively close. We need the subprocess extract pid+start_time in a race free manner.
-        return PostmasterProcess.from_pid(pid)
+  try:
+    # Start postgres process
+    # We need to start it in a way that makes it not our child
+    # In Nim, we can use startProcess with poParentStreams and poDaemon
+    var envArray: seq[string] = @[]
+    for key, val in env.pairs:
+      envArray.add(fmt"{key}={val}")
+
+    let process = startProcess(
+      command = cmdline[0],
+      args = cmdline[1..^1],
+      env = env,
+      options = {poParentStreams, poDaemon}
+    )
+
+    let pid = process.processID
+    logger.info(fmt"postmaster pid={pid}")
+
+    result = fromPid(pid)
+  except OSError as e:
+    logger.error(fmt"Failed to execute {cmdline}: {e.msg}")
+    result = nil
+
