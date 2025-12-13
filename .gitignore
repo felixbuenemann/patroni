@@ -71,3 +71,8 @@ data/
 # macOS
 **/.DS_Store
 patroni/main
+
+# Compiled test binaries
+tests/test_*
+!tests/test_*.nim
+!tests/test_*.py.bak
