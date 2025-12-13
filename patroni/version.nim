@@ -1,5 +1,5 @@
 ## This module specifies the current Patroni version.
 ##
-## :var version: the current Patroni version.
+## :var patroniVersion: the current Patroni version.
 
-const version* = "4.1.0"
+const patroniVersion* = "4.1.0"

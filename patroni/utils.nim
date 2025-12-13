@@ -22,7 +22,7 @@ proc tzutc*(): Timezone =
 var logger* = "patroni.utils"
 
 # User agent string
-const USER_AGENT* = fmt"Patroni/{version} Nim/{NimVersion} {hostOS}"
+const USER_AGENT* = "Patroni/" & patroniVersion & " Nim/" & NimVersion & " " & hostOS
 
 # Regular expressions
 let
@@ -428,7 +428,7 @@ proc splitAddress*(address: string): tuple[host: string, port: int] =
   if parts.len == 2:
     result.host = parts[0]
     try:
-      result.port = parseInt(parts[1])
+      result.port = strutils.parseInt(parts[1])
     except:
       result.port = 0
   else:

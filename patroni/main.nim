@@ -7,7 +7,7 @@ import ./version
 import ./exceptions
 import ./global_config
 import ./tags
-import ./dcs/`__init__`
+import ./dcs/dcs
 
 type
   ScheduledRestart* = object

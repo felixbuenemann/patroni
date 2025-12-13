@@ -34,7 +34,7 @@ proc newCaseInsensitiveSet*(values: openArray[string] = []): CaseInsensitiveSet 
   new(result)
   result.values = initTable[string, string]()
   for v in values:
-    result.add(v)
+    result.values[v.toLowerAscii()] = v
 
 proc `$`*(self: CaseInsensitiveSet): string =
   ## Get set values for printing.
@@ -94,7 +94,7 @@ proc incl*(self: CaseInsensitiveSet, value: string) =
   ## Alias for add.
   self.add(value)
 
-proc discard*(self: CaseInsensitiveSet, value: string) =
+proc remove*(self: CaseInsensitiveSet, value: string) =
   ## Remove value from this set.
   ##
   ## Search is performed case-insensitively. If value is not present in the set, no exception is raised.
@@ -103,8 +103,8 @@ proc discard*(self: CaseInsensitiveSet, value: string) =
   self.values.del(value.toLowerAscii())
 
 proc excl*(self: CaseInsensitiveSet, value: string) =
-  ## Alias for discard.
-  self.discard(value)
+  ## Alias for remove.
+  self.remove(value)
 
 proc issubset*(self, other: CaseInsensitiveSet): bool =
   ## Check if this set is a subset of other.
