@@ -1,6 +1,8 @@
 ## Cancellable subprocess execution.
 
-import std/[locks, os, osproc, strformat, options]
+import std/[locks, os, osproc, strformat, options, streams]
+when defined(posix):
+  import posix
 import ../exceptions
 import ../log
 import ../utils
@@ -10,13 +12,13 @@ let logger = getLogger("patroni.postgresql.cancellable")
 type
   CancellableExecutor* = ref object of RootObj
     ## There must be only one such process so that AsyncExecutor can easily cancel it.
-    process: Process
-    processCmd: seq[string]
-    processChildren: seq[int]  # PIDs of child processes
-    lock: Lock
+    process*: Process
+    processCmd*: seq[string]
+    processChildren*: seq[int]  # PIDs of child processes
+    lock*: Lock
 
   CancellableSubprocess* = ref object of CancellableExecutor
-    isCancelledFlag: bool
+    isCancelledFlag*: bool
 
 proc newCancellableExecutor*(): CancellableExecutor =
   ## Create a new CancellableExecutor instance.
@@ -48,14 +50,12 @@ proc killProcess(ce: CancellableExecutor) =
       except OSError:
         discard
 
-proc killChildren(ce: CancellableExecutor) =
+proc killChildren*(ce: CancellableExecutor) =
   ## Kill child processes.
   withLock(ce.lock):
     for pid in ce.processChildren:
       try:
-        # In Nim, we would use posix.kill(pid, SIGKILL)
         when defined(posix):
-          import posix
           discard posix.kill(Pid(pid), SIGKILL)
       except OSError:
         discard

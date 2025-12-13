@@ -1,6 +1,8 @@
 ## Callback executor for PostgreSQL lifecycle events.
 
 import std/[locks, os, osproc, strformat]
+when defined(posix):
+  import posix
 import ./cancellable
 import ../log
 
@@ -88,7 +90,6 @@ proc killChildren(ce: CallbackExecutor) =
     for pid in ce.processChildren:
       try:
         when defined(posix):
-          import posix
           discard posix.kill(Pid(pid), SIGKILL)
       except OSError:
         discard
@@ -96,29 +97,30 @@ proc killChildren(ce: CallbackExecutor) =
 
 proc runLoop(ce: CallbackExecutor) {.thread.} =
   ## Main loop for the callback executor thread.
-  while ce.running:
-    var cmd: seq[string] = @[]
+  {.cast(gcsafe).}:
+    while ce.running:
+      var cmd: seq[string] = @[]
 
-    withLock(ce.condLock):
-      if ce.cmd.len == 0:
-        wait(ce.condition, ce.condLock)
-      cmd = ce.cmd
-      ce.cmd = @[]
+      withLock(ce.condLock):
+        if ce.cmd.len == 0:
+          wait(ce.condition, ce.condLock)
+        cmd = ce.cmd
+        ce.cmd = @[]
 
-    if cmd.len > 0:
-      withLock(ce.lock):
-        ce.processChildren = @[]
-        ce.processCmd = cmd
-        try:
-          ce.process = startProcess(cmd[0], args = cmd[1..^1], options = {poUsePath})
-        except OSError, IOError:
-          logger.exception(fmt"Failed to execute {cmd}", nil)
-          continue
+      if cmd.len > 0:
+        withLock(ce.lock):
+          ce.processChildren = @[]
+          ce.processCmd = cmd
+          try:
+            ce.process = startProcess(cmd[0], args = cmd[1..^1], options = {poUsePath})
+          except OSError, IOError:
+            logger.exception(fmt"Failed to execute {cmd}", nil)
+            continue
 
-      if ce.process != nil:
-        discard waitForExit(ce.process)
-        close(ce.process)
-        ce.killChildren()
+        if ce.process != nil:
+          discard waitForExit(ce.process)
+          close(ce.process)
+          ce.killChildren()
 
 proc newCallbackExecutor*(): CallbackExecutor =
   ## Create a new CallbackExecutor instance.
