@@ -1,3 +1,8 @@
-from patroni.watchdog.base import Watchdog, WatchdogError
+## Watchdog module for Patroni.
+##
+## Provides hardware or software watchdog support for ensuring node failover
+## if Patroni becomes unresponsive.
 
-__all__ = ['WatchdogError', 'Watchdog']
+import ./base
+
+export base
