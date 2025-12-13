@@ -10,22 +10,22 @@ let logger = getLogger("patroni.file_perm")
 const
   # Mode mask for data directory permissions that only allows the owner to
   # read/write directories and files -- mask 077.
-  PG_MODE_MASK_OWNER = S_IRWXG or S_IRWXO
+  PG_MODE_MASK_OWNER = Mode(S_IRWXG or S_IRWXO)
 
   # Mode mask for data directory permissions that also allows group read/execute -- mask 027.
-  PG_MODE_MASK_GROUP = S_IWGRP or S_IRWXO
+  PG_MODE_MASK_GROUP = Mode(S_IWGRP or S_IRWXO)
 
   # Default mode for creating directories -- mode 700.
-  PG_DIR_MODE_OWNER = S_IRWXU
+  PG_DIR_MODE_OWNER = Mode(S_IRWXU)
 
   # Mode for creating directories that allows group read/execute -- mode 750.
-  PG_DIR_MODE_GROUP = S_IRWXU or S_IRGRP or S_IXGRP
+  PG_DIR_MODE_GROUP = Mode(S_IRWXU or S_IRGRP or S_IXGRP)
 
   # Default mode for creating files -- mode 600.
-  PG_FILE_MODE_OWNER = S_IRUSR or S_IWUSR
+  PG_FILE_MODE_OWNER = Mode(S_IRUSR or S_IWUSR)
 
   # Mode for creating files that allows group read -- mode 640.
-  PG_FILE_MODE_GROUP = S_IRUSR or S_IWUSR or S_IRGRP
+  PG_FILE_MODE_GROUP = Mode(S_IRUSR or S_IWUSR or S_IRGRP)
 
 type
   FilePermissions* = ref object

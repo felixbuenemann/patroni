@@ -1,6 +1,6 @@
 ## Implement facilities for executing asynchronous tasks.
 
-import std/[locks, options, times]
+import std/[locks, options, os, times]
 import ./log
 
 type

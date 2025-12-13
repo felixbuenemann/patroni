@@ -48,59 +48,37 @@ type
 
 proc newBoolValidator*(versionFrom: int, versionTill: Option[int] = none(int)): Transformable =
   ## Create a boolean parameter validator.
-  new(result)
-  result.kind = tkBool
-  result.versionFrom = versionFrom
-  result.versionTill = versionTill
+  result = Transformable(kind: tkBool, versionFrom: versionFrom, versionTill: versionTill)
 
 proc newIntegerValidator*(versionFrom: int, versionTill: Option[int] = none(int),
                           minVal: int, maxVal: int,
                           unit: Option[string] = none(string)): Transformable =
   ## Create an integer parameter validator.
-  new(result)
-  result.kind = tkInteger
-  result.versionFrom = versionFrom
-  result.versionTill = versionTill
-  result.intMinVal = minVal
-  result.intMaxVal = maxVal
-  result.intUnit = unit
+  result = Transformable(kind: tkInteger, versionFrom: versionFrom, versionTill: versionTill,
+                         intMinVal: minVal, intMaxVal: maxVal, intUnit: unit)
 
 proc newRealValidator*(versionFrom: int, versionTill: Option[int] = none(int),
                        minVal: float, maxVal: float,
                        unit: Option[string] = none(string)): Transformable =
   ## Create a real/float parameter validator.
-  new(result)
-  result.kind = tkReal
-  result.versionFrom = versionFrom
-  result.versionTill = versionTill
-  result.realMinVal = minVal
-  result.realMaxVal = maxVal
-  result.realUnit = unit
+  result = Transformable(kind: tkReal, versionFrom: versionFrom, versionTill: versionTill,
+                         realMinVal: minVal, realMaxVal: maxVal, realUnit: unit)
 
 proc newEnumValidator*(versionFrom: int, versionTill: Option[int] = none(int),
                        possibleValues: seq[string]): Transformable =
   ## Create an enum parameter validator.
-  new(result)
-  result.kind = tkEnum
-  result.versionFrom = versionFrom
-  result.versionTill = versionTill
-  result.possibleValues = possibleValues
+  result = Transformable(kind: tkEnum, versionFrom: versionFrom, versionTill: versionTill,
+                         possibleValues: possibleValues)
 
 proc newEnumBoolValidator*(versionFrom: int, versionTill: Option[int] = none(int),
                            possibleValues: seq[string]): Transformable =
   ## Create an enum-or-boolean parameter validator.
-  new(result)
-  result.kind = tkEnumBool
-  result.versionFrom = versionFrom
-  result.versionTill = versionTill
-  result.possibleValues = possibleValues
+  result = Transformable(kind: tkEnumBool, versionFrom: versionFrom, versionTill: versionTill,
+                         possibleValues: possibleValues)
 
 proc newStringValidator*(versionFrom: int, versionTill: Option[int] = none(int)): Transformable =
   ## Create a string parameter validator.
-  new(result)
-  result.kind = tkString
-  result.versionFrom = versionFrom
-  result.versionTill = versionTill
+  result = Transformable(kind: tkString, versionFrom: versionFrom, versionTill: versionTill)
 
 proc transform*(self: Transformable, name: string, value: string): Option[string] =
   ## Validate and transform a parameter value.
@@ -110,7 +88,7 @@ proc transform*(self: Transformable, name: string, value: string): Option[string
   ## :returns: The validated value or none if invalid.
   case self.kind
   of tkBool:
-    let parsed = parseBool(value)
+    let parsed = parseBoolOpt(value)
     if parsed.isSome:
       return some(value)
     logger.warning(fmt"Removing bool parameter={name} from the config due to invalid value={value}")
@@ -118,7 +96,7 @@ proc transform*(self: Transformable, name: string, value: string): Option[string
 
   of tkInteger:
     let unit = if self.intUnit.isSome: self.intUnit.get else: ""
-    let parsed = parseInt(value, unit)
+    let parsed = parseIntValue(value, unit)
     if parsed.isSome:
       let numValue = parsed.get
       if numValue < self.intMinVal:
@@ -133,7 +111,7 @@ proc transform*(self: Transformable, name: string, value: string): Option[string
 
   of tkReal:
     let unit = if self.realUnit.isSome: self.realUnit.get else: ""
-    let parsed = parseReal(value, unit)
+    let parsed = parseRealValue(value, unit)
     if parsed.isSome:
       let numValue = parsed.get
       if numValue < self.realMinVal:
@@ -153,7 +131,7 @@ proc transform*(self: Transformable, name: string, value: string): Option[string
     return none(string)
 
   of tkEnumBool:
-    let parsed = parseBool(value)
+    let parsed = parseBoolOpt(value)
     if parsed.isSome:
       return some(value)
     if value.toLowerAscii() in self.possibleValues:
