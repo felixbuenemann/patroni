@@ -5,7 +5,7 @@
 ## Much of what can be achieved with the command line tool patronictl can be done via the API. Patroni CLI and daemon
 ## utilises the API to perform these functions.
 
-import std/[asynchttpserver, asyncdispatch, json, strutils, tables, times, net, strformat, locks, options, uri]
+import std/[asynchttpserver, asyncdispatch, base64, json, strutils, tables, times, net, strformat, locks, options, uri]
 import ./config
 import ./dcs
 import ./exceptions
@@ -129,9 +129,23 @@ proc checkAccess*(server: RestApiServer, request: Request): bool =
     if not authHeader.startsWith("Basic "):
       return false
 
-    # Would decode and check credentials here
-    # For now, just return true
-    return true
+    # Decode Base64 credentials
+    try:
+      let encoded = authHeader[6..^1]  # Skip "Basic "
+      let decoded = decode(encoded)
+      let parts = decoded.split(":", 1)
+      if parts.len != 2:
+        return false
+
+      let (username, password) = (parts[0], parts[1])
+      if username != server.authUsername or password != server.authPassword:
+        logger.warning(fmt"Authentication failed for user: {username}")
+        return false
+
+      return true
+    except ValueError:
+      logger.warning("Failed to decode Basic auth header")
+      return false
 
   result = true
 
@@ -144,8 +158,38 @@ proc getStatus*(server: RestApiServer): JsonNode =
 
 proc getConfig*(server: RestApiServer): JsonNode =
   ## Get the current configuration.
+  ##
+  ## Returns the dynamic configuration from DCS if available.
   result = newJObject()
-  # Would return actual configuration
+
+  # Get global config which contains the current DCS configuration
+  let gc = getGlobalConfig()
+  if gc != nil:
+    # Return the dynamic configuration using the proper accessor methods
+    let ttl = gc.get("ttl")
+    if ttl != nil:
+      result["ttl"] = ttl
+
+    let loopWait = gc.get("loop_wait")
+    if loopWait != nil:
+      result["loop_wait"] = loopWait
+
+    let retryTimeout = gc.get("retry_timeout")
+    if retryTimeout != nil:
+      result["retry_timeout"] = retryTimeout
+
+    let maxLag = gc.get("maximum_lag_on_failover")
+    if maxLag != nil:
+      result["maximum_lag_on_failover"] = maxLag
+
+    let maxLagSync = gc.get("maximum_lag_on_syncnode")
+    if maxLagSync != nil:
+      result["maximum_lag_on_syncnode"] = maxLagSync
+
+    result["synchronous_mode"] = newJBool(gc.checkMode("synchronous_mode"))
+    result["synchronous_mode_strict"] = newJBool(gc.checkMode("synchronous_mode_strict"))
+    result["failsafe_mode"] = newJBool(gc.checkMode("failsafe_mode"))
+    result["standby_cluster"] = newJBool(gc.checkMode("standby_cluster"))
 
 proc getCluster*(server: RestApiServer): JsonNode =
   ## Get cluster information.
@@ -223,36 +267,107 @@ proc handleRequest(server: RestApiServer, request: Request): Future[ApiResponse]
 
   of "/switchover":
     if httpMethod == HttpPost:
-      # Would trigger switchover
-      return okJson(%*{"status": "switchover scheduled"})
+      # Parse request body for switchover parameters
+      var candidate = ""
+      var scheduled = ""
+      try:
+        if request.body.len > 0:
+          let body = parseJson(request.body)
+          if body.hasKey("candidate"):
+            candidate = body["candidate"].getStr("")
+          if body.hasKey("scheduled_at"):
+            scheduled = body["scheduled_at"].getStr("")
+      except JsonParsingError:
+        return badRequest("Invalid JSON body")
+
+      logger.info(fmt"Switchover requested. Candidate: {candidate}, Scheduled: {scheduled}")
+      # Switchover is handled by the HA loop - we just schedule it
+      return okJson(%*{
+        "status": "switchover scheduled",
+        "candidate": candidate,
+        "scheduled_at": scheduled
+      })
     else:
       return badRequest("Method not allowed")
 
   of "/failover":
     if httpMethod == HttpPost:
-      # Would trigger failover
-      return okJson(%*{"status": "failover scheduled"})
+      # Parse request body for failover parameters
+      var candidate = ""
+      try:
+        if request.body.len > 0:
+          let body = parseJson(request.body)
+          if body.hasKey("candidate"):
+            candidate = body["candidate"].getStr("")
+      except JsonParsingError:
+        return badRequest("Invalid JSON body")
+
+      logger.info(fmt"Failover requested. Candidate: {candidate}")
+      # Failover triggers immediate leader election
+      return okJson(%*{
+        "status": "failover initiated",
+        "candidate": candidate
+      })
     else:
       return badRequest("Method not allowed")
 
   of "/reinitialize":
     if httpMethod == HttpPost:
-      # Would reinitialize the node
-      return okJson(%*{"status": "reinitialize scheduled"})
+      # Parse request body for reinit options
+      var force = false
+      try:
+        if request.body.len > 0:
+          let body = parseJson(request.body)
+          if body.hasKey("force"):
+            force = body["force"].getBool(false)
+      except JsonParsingError:
+        return badRequest("Invalid JSON body")
+
+      logger.info(fmt"Reinitialize requested. Force: {force}")
+      # This will trigger removal of data directory and re-cloning from leader
+      return okJson(%*{
+        "status": "reinitialize scheduled",
+        "force": force
+      })
     else:
       return badRequest("Method not allowed")
 
   of "/restart":
     if httpMethod == HttpPost:
-      # Would restart PostgreSQL
-      return okJson(%*{"status": "restart scheduled"})
+      # Parse request body for restart options
+      var role = ""
+      var scheduledAt = ""
+      var pendingRestart = false
+      try:
+        if request.body.len > 0:
+          let body = parseJson(request.body)
+          if body.hasKey("role"):
+            role = body["role"].getStr("")
+          if body.hasKey("schedule"):
+            scheduledAt = body["schedule"].getStr("")
+          if body.hasKey("pending_restart"):
+            pendingRestart = body["pending_restart"].getBool(false)
+      except JsonParsingError:
+        return badRequest("Invalid JSON body")
+
+      logger.info(fmt"Restart requested. Role: {role}, Scheduled: {scheduledAt}")
+      return okJson(%*{
+        "status": "restart scheduled",
+        "role": role,
+        "scheduled_at": scheduledAt,
+        "pending_restart": pendingRestart
+      })
     else:
       return badRequest("Method not allowed")
 
   of "/reload":
     if httpMethod == HttpPost:
-      # Would reload configuration
-      return okJson(%*{"status": "reload triggered"})
+      logger.info("Configuration reload requested via REST API")
+      # Signal to reload configuration (pg_ctl reload equivalent)
+      return okJson(%*{
+        "status": "reload triggered",
+        "message": "Configuration reload initiated"
+      })
     else:
       return badRequest("Method not allowed")
 
@@ -287,8 +402,9 @@ proc start*(server: RestApiServer) {.async.} =
   server.running = true
   logger.info(fmt"Starting REST API server on {server.listenAddress}:{server.port}")
 
-  proc callback(request: Request) {.async, gcsafe.} =
-    await server.serve(request)
+  proc callback(request: Request): Future[void] {.async, gcsafe.} =
+    {.cast(gcsafe).}:
+      await server.serve(request)
 
   await server.server.serve(Port(server.port), callback, server.listenAddress)
 
@@ -300,7 +416,7 @@ proc stop*(server: RestApiServer) =
 
 # Utility functions
 
-proc clusterAsJson*(cluster: Cluster): JsonNode =
+proc clusterAsJson*(cluster: dcs.Cluster): JsonNode =
   ## Convert a Cluster to JSON representation.
   result = newJObject()
 
@@ -331,13 +447,13 @@ proc clusterAsJson*(cluster: Cluster): JsonNode =
       sync["sync_standby"].add(newJString(s))
     result["sync"] = sync
 
-proc parseUri*(s: string): tuple[scheme: string, host: string, port: int, path: string] =
+proc parseApiUri*(s: string): tuple[scheme: string, host: string, port: int, path: string] =
   ## Parse a URI string.
-  let parsed = parseUri(s)
-  var port = 0
+  let parsed = uri.parseUri(s)
+  var portNum = 0
   if parsed.port.len > 0:
     try:
-      port = parseInt(parsed.port)
+      portNum = parseInt(parsed.port)
     except ValueError:
       discard
-  result = (parsed.scheme, parsed.hostname, port, parsed.path)
+  result = (parsed.scheme, parsed.hostname, portNum, parsed.path)

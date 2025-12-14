@@ -43,9 +43,15 @@ type
     lock: Lock
     running: bool
 
+  # Forward declaration for PostgreSQL type
+  PostgresqlPtr* = ref object
+    connectionPool*: ConnectionPool
+    majorVersion*: int
+    dataDir*: string
+
   SlotsHandler* = ref object
     ## Handler for managing replication slots.
-    postgresql: pointer  # Postgresql - forward declaration
+    postgresql*: PostgresqlPtr
     schedule: Table[string, Table[string, int64]]
     storedSlots: Table[string, ReplicationSlot]
     replicationSlots: Table[string, ReplicationSlot]
@@ -97,7 +103,7 @@ proc newReplicationSlot*(name: string, slotType: SlotType = stPhysical,
   result.confirmedFlushLsn = 0
   result.catalog_xmin = 0
 
-proc newSlotsHandler*(postgresql: pointer): SlotsHandler =
+proc newSlotsHandler*(postgresql: PostgresqlPtr): SlotsHandler =
   ## Create a new SlotsHandler.
   new(result)
   result.postgresql = postgresql
@@ -141,9 +147,62 @@ proc loadReplicationSlots*(self: SlotsHandler) =
   ## Load replication slots from PostgreSQL.
   self.replicationSlots = initTable[string, ReplicationSlot]()
 
-  # Would query pg_replication_slots here
-  # SELECT slot_name, slot_type, database, plugin, active, restart_lsn, confirmed_flush_lsn
-  # FROM pg_replication_slots
+  if self.postgresql == nil or self.postgresql.connectionPool == nil:
+    return
+
+  try:
+    let conn = self.postgresql.connectionPool.get("slots")
+    let pgConn = conn.get()
+
+    let query = """
+      SELECT slot_name, slot_type, database, plugin, active,
+             restart_lsn, confirmed_flush_lsn, catalog_xmin
+      FROM pg_catalog.pg_replication_slots
+    """
+
+    let rows = pgConn.query(query)
+    for row in rows:
+      if row.len < 5:
+        continue
+
+      let slotName = row[0]
+      let slotTypeStr = row[1]
+      let database = row[2]
+      let plugin = row[3]
+      let activeStr = row[4]
+
+      let slot = newReplicationSlot(slotName)
+      slot.slotType = if slotTypeStr == "physical": stPhysical else: stLogical
+      slot.database = database
+      slot.plugin = plugin
+      slot.active = activeStr == "t" or activeStr.toLowerAscii() == "true"
+
+      # Parse LSN values if present
+      if row.len > 5 and row[5].len > 0:
+        try:
+          slot.restartLsn = parseLsn(row[5])
+        except ValueError:
+          discard
+
+      if row.len > 6 and row[6].len > 0:
+        try:
+          slot.confirmedFlushLsn = parseLsn(row[6])
+        except ValueError:
+          discard
+
+      if row.len > 7 and row[7].len > 0:
+        try:
+          slot.catalog_xmin = parseInt(row[7])
+        except ValueError:
+          discard
+
+      self.replicationSlots[slotName] = slot
+
+    logger.debug(fmt"Loaded {self.replicationSlots.len} replication slots")
+  except OperationalError as e:
+    logger.error(fmt"Failed to load replication slots: {e.msg}")
+  except DatabaseError as e:
+    logger.error(fmt"Database error loading replication slots: {e.msg}")
 
 proc createPhysicalReplicationSlot*(self: SlotsHandler, name: string, immediately_reserve: bool = false): bool =
   ## Create a physical replication slot.
@@ -153,8 +212,25 @@ proc createPhysicalReplicationSlot*(self: SlotsHandler, name: string, immediatel
   ## :returns: true if successful.
   logger.info(fmt"Creating physical replication slot '{name}'")
 
-  # Would execute: SELECT pg_create_physical_replication_slot(name, immediately_reserve)
-  result = true
+  if self.postgresql == nil or self.postgresql.connectionPool == nil:
+    return false
+
+  try:
+    let conn = self.postgresql.connectionPool.get("slots")
+    let pgConn = conn.get()
+
+    let reserveStr = if immediately_reserve: "true" else: "false"
+    let query = fmt"SELECT pg_catalog.pg_create_physical_replication_slot('{name}', {reserveStr})"
+    discard pgConn.query(query)
+
+    logger.info(fmt"Created physical replication slot '{name}'")
+    return true
+  except OperationalError as e:
+    logger.error(fmt"Failed to create physical slot '{name}': {e.msg}")
+    return false
+  except DatabaseError as e:
+    logger.error(fmt"Database error creating physical slot '{name}': {e.msg}")
+    return false
 
 proc createLogicalReplicationSlot*(self: SlotsHandler, name: string, database: string,
                                    plugin: string = "pgoutput"): bool =
@@ -166,9 +242,28 @@ proc createLogicalReplicationSlot*(self: SlotsHandler, name: string, database: s
   ## :returns: true if successful.
   logger.info(fmt"Creating logical replication slot '{name}' for database '{database}'")
 
-  # Would execute in the target database:
-  # SELECT pg_create_logical_replication_slot(name, plugin)
-  result = true
+  if self.postgresql == nil or self.postgresql.connectionPool == nil:
+    return false
+
+  try:
+    # Connect to the specified database for logical slot creation
+    var overrides = initTable[string, string]()
+    overrides["database"] = database
+
+    let conn = self.postgresql.connectionPool.get("slots_" & database, overrides)
+    let pgConn = conn.get()
+
+    let query = fmt"SELECT pg_catalog.pg_create_logical_replication_slot('{name}', '{plugin}')"
+    discard pgConn.query(query)
+
+    logger.info(fmt"Created logical replication slot '{name}' with plugin '{plugin}'")
+    return true
+  except OperationalError as e:
+    logger.error(fmt"Failed to create logical slot '{name}': {e.msg}")
+    return false
+  except DatabaseError as e:
+    logger.error(fmt"Database error creating logical slot '{name}': {e.msg}")
+    return false
 
 proc dropReplicationSlot*(self: SlotsHandler, name: string): bool =
   ## Drop a replication slot.
@@ -177,8 +272,28 @@ proc dropReplicationSlot*(self: SlotsHandler, name: string): bool =
   ## :returns: true if successful.
   logger.info(fmt"Dropping replication slot '{name}'")
 
-  # Would execute: SELECT pg_drop_replication_slot(name)
-  result = true
+  if self.postgresql == nil or self.postgresql.connectionPool == nil:
+    return false
+
+  try:
+    let conn = self.postgresql.connectionPool.get("slots")
+    let pgConn = conn.get()
+
+    let query = fmt"SELECT pg_catalog.pg_drop_replication_slot('{name}')"
+    discard pgConn.query(query)
+
+    logger.info(fmt"Dropped replication slot '{name}'")
+    return true
+  except OperationalError as e:
+    logger.error(fmt"Failed to drop slot '{name}': {e.msg}")
+    return false
+  except DatabaseError as e:
+    # Slot might already be dropped or not exist
+    if "does not exist" in e.msg:
+      logger.warning(fmt"Slot '{name}' does not exist, nothing to drop")
+      return true
+    logger.error(fmt"Database error dropping slot '{name}': {e.msg}")
+    return false
 
 proc advanceReplicationSlot*(self: SlotsHandler, name: string, lsn: int64): bool =
   ## Advance a replication slot to a specific LSN.
@@ -189,8 +304,29 @@ proc advanceReplicationSlot*(self: SlotsHandler, name: string, lsn: int64): bool
   let lsnStr = formatLsn(lsn)
   logger.debug(fmt"Advancing slot '{name}' to {lsnStr}")
 
-  # Would execute: SELECT pg_replication_slot_advance(name, lsn)
-  result = true
+  if self.postgresql == nil or self.postgresql.connectionPool == nil:
+    return false
+
+  # pg_replication_slot_advance requires PostgreSQL 11+
+  if self.postgresql.majorVersion < 110000:
+    logger.warning("pg_replication_slot_advance requires PostgreSQL 11+")
+    return false
+
+  try:
+    let conn = self.postgresql.connectionPool.get("slots")
+    let pgConn = conn.get()
+
+    let query = fmt"SELECT pg_catalog.pg_replication_slot_advance('{name}', '{lsnStr}')"
+    discard pgConn.query(query)
+
+    logger.debug(fmt"Advanced slot '{name}' to {lsnStr}")
+    return true
+  except OperationalError as e:
+    logger.error(fmt"Failed to advance slot '{name}': {e.msg}")
+    return false
+  except DatabaseError as e:
+    logger.error(fmt"Database error advancing slot '{name}': {e.msg}")
+    return false
 
 proc syncReplicationSlots*(self: SlotsHandler, cluster: dcs.Cluster, tags: Tags): bool =
   ## Synchronize replication slots with the cluster state.

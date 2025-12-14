@@ -110,14 +110,40 @@ proc getClusterMembers*(ctl: PatroniCtl, cluster: dcs.Cluster): seq[seq[string]]
     row.add($member.xlogLocation)
     result.add(row)
 
+proc getMemberApiUrl(ctl: PatroniCtl, member: string): string =
+  ## Get the API URL for a specific member from DCS.
+  if ctl.dcs != nil:
+    let cluster = ctl.dcs.getCluster()
+    for m in cluster.members:
+      if m.name == member:
+        return m.apiUrl
+  result = ""
+
+proc getLeaderApiUrl(ctl: PatroniCtl): string =
+  ## Get the API URL for the current leader from DCS.
+  if ctl.dcs != nil:
+    let cluster = ctl.dcs.getCluster()
+    if cluster.leader != nil and cluster.leader.member != nil:
+      return cluster.leader.member.apiUrl
+  result = ""
+
 proc list*(ctl: PatroniCtl, clusterName: string): int =
   ## List cluster members.
   echo fmt"Cluster: {clusterName}"
   echo ""
 
-  # Would fetch actual cluster data via REST API
   let headers = @["Member", "Role", "State", "Timeline", "Lag"]
-  let rows: seq[seq[string]] = @[]
+  var rows: seq[seq[string]] = @[]
+
+  # Try to fetch cluster data via DCS
+  if ctl.dcs != nil:
+    try:
+      let cluster = ctl.dcs.getCluster()
+      rows = ctl.getClusterMembers(cluster)
+    except DCSError as e:
+      logger.error(fmt"Failed to get cluster info from DCS: {e.msg}")
+  else:
+    logger.warning("No DCS configured, cannot list cluster members")
 
   printTable(headers, rows, clusterName)
   result = 0
@@ -139,9 +165,35 @@ proc switchover*(ctl: PatroniCtl, clusterName: string, leader: string = "",
       echo "Switchover cancelled."
       return 1
 
-  # Would call REST API to perform switchover
-  echo "Switchover initiated."
-  result = 0
+  # Get leader API URL and call switchover endpoint
+  let leaderUrl = ctl.getLeaderApiUrl()
+  if leaderUrl.len == 0:
+    echo "Error: Could not determine leader API URL"
+    return 1
+
+  let body = %*{
+    "leader": leader,
+    "candidate": candidate
+  }
+
+  try:
+    let response = ctl.request.call(leaderUrl, "POST", "switchover", $body)
+    if response.status in [200, 202]:
+      echo "Switchover initiated successfully."
+      try:
+        let respJson = parseJson(response.body)
+        if respJson.hasKey("message"):
+          echo "  " & respJson["message"].getStr()
+      except JsonParsingError:
+        discard
+      return 0
+    else:
+      echo fmt"Switchover failed with status {response.status}"
+      echo "  " & response.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error performing switchover: {e.msg}"
+    return 1
 
 proc failover*(ctl: PatroniCtl, clusterName: string, candidate: string = "",
                force: bool = false): int =
@@ -158,9 +210,26 @@ proc failover*(ctl: PatroniCtl, clusterName: string, candidate: string = "",
       echo "Failover cancelled."
       return 1
 
-  # Would call REST API to perform failover
-  echo "Failover initiated."
-  result = 0
+  # Get leader API URL and call failover endpoint
+  let leaderUrl = ctl.getLeaderApiUrl()
+  if leaderUrl.len == 0:
+    echo "Error: Could not determine leader API URL"
+    return 1
+
+  let body = %*{"candidate": candidate}
+
+  try:
+    let response = ctl.request.call(leaderUrl, "POST", "failover", $body)
+    if response.status in [200, 202]:
+      echo "Failover initiated successfully."
+      return 0
+    else:
+      echo fmt"Failover failed with status {response.status}"
+      echo "  " & response.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error performing failover: {e.msg}"
+    return 1
 
 proc restart*(ctl: PatroniCtl, clusterName: string, member: string = "",
               role: CtlPostgresqlRole = cpAny, force: bool = false): int =
@@ -177,9 +246,31 @@ proc restart*(ctl: PatroniCtl, clusterName: string, member: string = "",
       echo "Restart cancelled."
       return 1
 
-  # Would call REST API to restart
-  echo "Restart initiated."
-  result = 0
+  # Get member or leader API URL
+  var apiUrl = ""
+  if member.len > 0:
+    apiUrl = ctl.getMemberApiUrl(member)
+  else:
+    apiUrl = ctl.getLeaderApiUrl()
+
+  if apiUrl.len == 0:
+    echo "Error: Could not determine API URL"
+    return 1
+
+  let body = %*{"role": $role}
+
+  try:
+    let response = ctl.request.call(apiUrl, "POST", "restart", $body)
+    if response.status in [200, 202]:
+      echo "Restart initiated successfully."
+      return 0
+    else:
+      echo fmt"Restart failed with status {response.status}"
+      echo "  " & response.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error performing restart: {e.msg}"
+    return 1
 
 proc reinit*(ctl: PatroniCtl, clusterName: string, member: string,
              force: bool = false): int =
@@ -193,46 +284,198 @@ proc reinit*(ctl: PatroniCtl, clusterName: string, member: string,
       echo "Reinitialize cancelled."
       return 1
 
-  # Would call REST API to reinitialize
-  echo "Reinitialize initiated."
-  result = 0
+  let apiUrl = ctl.getMemberApiUrl(member)
+  if apiUrl.len == 0:
+    echo fmt"Error: Could not find API URL for member {member}"
+    return 1
+
+  let body = %*{"force": force}
+
+  try:
+    let response = ctl.request.call(apiUrl, "POST", "reinitialize", $body)
+    if response.status in [200, 202]:
+      echo "Reinitialize initiated successfully."
+      return 0
+    else:
+      echo fmt"Reinitialize failed with status {response.status}"
+      echo "  " & response.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error performing reinitialize: {e.msg}"
+    return 1
 
 proc pause*(ctl: PatroniCtl, clusterName: string): int =
   ## Pause automatic failover.
   echo fmt"Pausing cluster {clusterName}"
-  # Would call REST API to pause
-  echo "Cluster paused."
-  result = 0
+
+  let leaderUrl = ctl.getLeaderApiUrl()
+  if leaderUrl.len == 0:
+    echo "Error: Could not determine leader API URL"
+    return 1
+
+  let body = %*{"pause": true}
+
+  try:
+    let response = ctl.request.call(leaderUrl, "PATCH", "config", $body)
+    if response.status == 200:
+      echo "Cluster paused successfully."
+      return 0
+    else:
+      echo fmt"Pause failed with status {response.status}"
+      echo "  " & response.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error pausing cluster: {e.msg}"
+    return 1
 
 proc resume*(ctl: PatroniCtl, clusterName: string): int =
   ## Resume automatic failover.
   echo fmt"Resuming cluster {clusterName}"
-  # Would call REST API to resume
-  echo "Cluster resumed."
-  result = 0
+
+  let leaderUrl = ctl.getLeaderApiUrl()
+  if leaderUrl.len == 0:
+    echo "Error: Could not determine leader API URL"
+    return 1
+
+  let body = %*{"pause": false}
+
+  try:
+    let response = ctl.request.call(leaderUrl, "PATCH", "config", $body)
+    if response.status == 200:
+      echo "Cluster resumed successfully."
+      return 0
+    else:
+      echo fmt"Resume failed with status {response.status}"
+      echo "  " & response.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error resuming cluster: {e.msg}"
+    return 1
 
 proc showConfig*(ctl: PatroniCtl, clusterName: string): int =
   ## Show cluster configuration.
   echo fmt"Configuration for cluster {clusterName}:"
   echo ""
-  # Would fetch and display actual configuration
-  result = 0
+
+  let leaderUrl = ctl.getLeaderApiUrl()
+  if leaderUrl.len == 0:
+    echo "Error: Could not determine leader API URL"
+    return 1
+
+  try:
+    let response = ctl.request.call(leaderUrl, "GET", "config")
+    if response.status == 200:
+      try:
+        let config = parseJson(response.body)
+        echo pretty(config)
+      except JsonParsingError:
+        echo response.body
+      return 0
+    else:
+      echo fmt"Failed to get config with status {response.status}"
+      echo "  " & response.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error getting config: {e.msg}"
+    return 1
 
 proc editConfig*(ctl: PatroniCtl, clusterName: string): int =
   ## Edit cluster configuration.
   echo fmt"Editing configuration for cluster {clusterName}"
-  # Would open editor and update configuration via REST API
-  result = 0
+
+  # First, get the current config
+  let leaderUrl = ctl.getLeaderApiUrl()
+  if leaderUrl.len == 0:
+    echo "Error: Could not determine leader API URL"
+    return 1
+
+  try:
+    let response = ctl.request.call(leaderUrl, "GET", "config")
+    if response.status != 200:
+      echo fmt"Failed to get config with status {response.status}"
+      return 1
+
+    # Write config to temp file
+    let tempFile = getTempDir() / "patroni_config_edit.json"
+    try:
+      let config = parseJson(response.body)
+      writeFile(tempFile, pretty(config))
+    except JsonParsingError:
+      writeFile(tempFile, response.body)
+
+    # Get editor from EDITOR env var or use default
+    let editor = getEnv("EDITOR", "vi")
+
+    # Open editor
+    let exitCode = execShellCmd(fmt"{editor} {tempFile}")
+    if exitCode != 0:
+      echo "Editor exited with error"
+      return 1
+
+    # Read modified config
+    let newConfig = readFile(tempFile)
+
+    # Update config via API
+    let updateResponse = ctl.request.call(leaderUrl, "PATCH", "config", newConfig)
+    if updateResponse.status == 200:
+      echo "Configuration updated successfully."
+      return 0
+    else:
+      echo fmt"Failed to update config with status {updateResponse.status}"
+      echo "  " & updateResponse.body
+      return 1
+  except CatchableError as e:
+    echo fmt"Error editing config: {e.msg}"
+    return 1
 
 proc reload*(ctl: PatroniCtl, clusterName: string, member: string = ""): int =
   ## Reload configuration on members.
   if member.len > 0:
     echo fmt"Reloading member {member} in cluster {clusterName}"
+    let apiUrl = ctl.getMemberApiUrl(member)
+    if apiUrl.len == 0:
+      echo fmt"Error: Could not find API URL for member {member}"
+      return 1
+
+    try:
+      let response = ctl.request.call(apiUrl, "POST", "reload")
+      if response.status in [200, 202]:
+        echo fmt"Reload triggered on {member}."
+        return 0
+      else:
+        echo fmt"Reload failed on {member} with status {response.status}"
+        return 1
+    except CatchableError as e:
+      echo fmt"Error reloading {member}: {e.msg}"
+      return 1
   else:
     echo fmt"Reloading all members in cluster {clusterName}"
-  # Would call REST API to reload
-  echo "Reload triggered."
-  result = 0
+    var failed = 0
+
+    if ctl.dcs != nil:
+      try:
+        let cluster = ctl.dcs.getCluster()
+        for m in cluster.members:
+          try:
+            let response = ctl.request.call(m.apiUrl, "POST", "reload")
+            if response.status in [200, 202]:
+              echo fmt"  Reload triggered on {m.name}."
+            else:
+              echo fmt"  Reload failed on {m.name} with status {response.status}"
+              inc failed
+          except CatchableError as e:
+            echo fmt"  Error reloading {m.name}: {e.msg}"
+            inc failed
+      except DCSError as e:
+        echo fmt"Error getting cluster members: {e.msg}"
+        return 1
+    else:
+      echo "Error: No DCS configured"
+      return 1
+
+    if failed > 0:
+      return 1
+    return 0
 
 proc flush*(ctl: PatroniCtl, clusterName: string, member: string = ""): int =
   ## Flush scheduled actions.
