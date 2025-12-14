@@ -74,5 +74,6 @@ patroni/main
 
 # Compiled test binaries
 tests/test_*
+tests/all_tests
 !tests/test_*.nim
 !tests/test_*.py.bak
