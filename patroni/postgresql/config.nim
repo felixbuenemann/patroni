@@ -3,7 +3,7 @@
 ## This module provides types and procedures for managing PostgreSQL
 ## configuration files (postgresql.conf, pg_hba.conf, recovery.conf).
 
-import std/[algorithm, json, options, os, re, sequtils, strformat, strutils, tables, times, uri]
+import std/[algorithm, json, options, os, posix, re, sequtils, strformat, strutils, tables, times, uri]
 import ../collections
 import ../dcs
 import ../exceptions
@@ -330,8 +330,11 @@ proc rewindCredentials*(self: ConfigHandler): Table[string, string] =
 
 proc setFilePermissions*(self: ConfigHandler, filename: string) =
   ## Set file permissions according to PGDATA permissions.
-  # Would use pgPerm to set appropriate permissions
-  discard
+  try:
+    let mode = pgPerm.fileCreateMode()
+    discard posix.chmod(filename.cstring, mode)
+  except OSError as e:
+    logger.warning(fmt"Failed to set permissions on {filename}: {e.msg}")
 
 proc configurationToSave(self: ConfigHandler): seq[string] =
   ## Get list of configuration files to save.
@@ -467,7 +470,11 @@ proc primaryConninfoParams*(self: ConfigHandler, member: Member): Option[Table[s
   for key, val in repl:
     ret[key] = val
 
-  # Would also add postgresql name as application_name
+  # Add application_name based on node name from global config
+  let globalConf = getGlobalConfig()
+  let nodeName = globalConf.getStr("name", "patroni")
+  ret["application_name"] = nodeName
+
   ret["sslmode"] = ret.getOrDefault("sslmode", "prefer")
 
   if self.krbsrvname.isSome:

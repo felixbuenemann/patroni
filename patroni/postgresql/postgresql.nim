@@ -514,8 +514,22 @@ proc callNowait*(self: Postgresql, cbType: CallbackAction) =
   if cbType in [caOnStart, caOnStop, caOnRestart, caOnRoleChange]:
     self.cbCalled = true
 
-  # Would execute callback here
-  logger.info(fmt"Callback triggered: {cbType}")
+  # Build callback command from config
+  let callbackName = $cbType
+  logger.info(fmt"Callback triggered: {callbackName}")
+
+  # Get callback command from config
+  if self.config != nil and self.config.hasKey("callbacks"):
+    let callbacks = self.config["callbacks"]
+    if callbacks.hasKey(callbackName):
+      let callbackCmd = callbacks[callbackName].getStr("")
+      if callbackCmd.len > 0:
+        # Build command with parameters: script action role scope
+        let role = $self.getRole()
+        var cmd = @[callbackCmd, callbackName, role, self.scope]
+        # Execute via callback executor
+        self.callbackExecutor.call(cmd)
+        logger.info(fmt"Executing callback: {cmd.join(\" \")}")
 
 proc getCbCalled*(self: Postgresql): bool =
   ## Check if callback was called.
@@ -560,8 +574,39 @@ proc follow*(self: Postgresql, member: Option[Member], role: PostgresqlRole = pr
 
 proc lastOperation*(self: Postgresql): int64 =
   ## Get the last operation LSN.
-  # Would query pg_current_wal_lsn() or replay position
+  ## For primary: returns pg_current_wal_lsn()
+  ## For standby: returns pg_last_wal_replay_lsn()
   result = 0
+
+  if self.connectionPool == nil:
+    return
+
+  try:
+    let conn = self.connectionPool.get("heartbeat")
+    let role = self.getRole()
+
+    # Choose appropriate function based on role and version
+    var query: string
+    if role == prPrimary:
+      if self.majorVersion >= 100000:
+        query = "SELECT pg_catalog.pg_current_wal_lsn()::text"
+      else:
+        query = "SELECT pg_catalog.pg_current_xlog_location()::text"
+    else:
+      if self.majorVersion >= 100000:
+        query = "SELECT pg_catalog.pg_last_wal_replay_lsn()::text"
+      else:
+        query = "SELECT pg_catalog.pg_last_xlog_replay_location()::text"
+
+    let rows = conn.query(query)
+    if rows.len > 0 and rows[0].len > 0:
+      let lsnStr = rows[0][0]
+      if lsnStr.len > 0 and lsnStr != "":
+        result = int64(parseLsn(lsnStr))
+  except PostgresConnectionException as e:
+    logger.warning(fmt"Failed to get last operation LSN: {e.msg}")
+  except CatchableError as e:
+    logger.warning(fmt"Error getting last operation LSN: {e.msg}")
 
 proc getServerVersion*(self: Postgresql): int =
   ## Get the server version.

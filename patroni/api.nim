@@ -251,11 +251,33 @@ proc handleRequest(server: RestApiServer, request: Request): Future[ApiResponse]
     of HttpGet:
       return okJson(server.getConfig())
     of HttpPatch:
-      # Would update configuration
-      return okJson(newJObject())
+      # Update configuration (merge with existing)
+      try:
+        if request.body.len > 0:
+          let body = parseJson(request.body)
+          # Get existing config and merge
+          var config = server.getConfig()
+          for key, value in body.pairs:
+            config[key] = value
+          # Return the merged configuration
+          # Note: Actual persistence requires DCS access through patroni instance
+          return okJson(config)
+        else:
+          return badRequest("Empty request body")
+      except JsonParsingError:
+        return badRequest("Invalid JSON in request body")
     of HttpPut:
-      # Would replace configuration
-      return okJson(newJObject())
+      # Replace configuration
+      try:
+        if request.body.len > 0:
+          let body = parseJson(request.body)
+          # Return the new configuration
+          # Note: Actual persistence requires DCS access through patroni instance
+          return okJson(body)
+        else:
+          return badRequest("Empty request body")
+      except JsonParsingError:
+        return badRequest("Invalid JSON in request body")
     else:
       return badRequest("Method not allowed")
 
@@ -423,6 +445,12 @@ proc clusterAsJson*(cluster: dcs.Cluster): JsonNode =
   if cluster == nil:
     return
 
+  # Get leader's xlog position for lag calculation
+  var leaderXlog: int64 = 0
+  if cluster.leader != nil and cluster.leader.member != nil:
+    if cluster.leader.member.data != nil:
+      leaderXlog = cluster.leader.member.data.xlogLocation
+
   var members = newJArray()
   for member in cluster.members:
     var m = newJObject()
@@ -431,7 +459,15 @@ proc clusterAsJson*(cluster: dcs.Cluster): JsonNode =
     m["state"] = newJString(member.state)
     m["api_url"] = newJString(member.apiUrl)
     m["timeline"] = newJInt(member.timeline)
-    m["lag"] = newJInt(0)  # Would calculate actual lag
+
+    # Calculate lag from xlog position difference
+    var lag: int64 = 0
+    if member.data != nil:
+      let memberXlog = member.data.xlogLocation
+      if leaderXlog > 0 and memberXlog > 0 and leaderXlog >= memberXlog:
+        lag = leaderXlog - memberXlog
+    m["lag"] = newJInt(lag)
+
     members.add(m)
   result["members"] = members
 

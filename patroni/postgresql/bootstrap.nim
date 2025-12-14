@@ -3,7 +3,7 @@
 ## This module provides functionality for bootstrapping PostgreSQL instances,
 ## including initial database creation and custom bootstrap methods.
 
-import std/[json, options, os, osproc, sequtils, strformat, strtabs, strutils, tables, tempfiles, times]
+import std/[json, options, os, osproc, sequtils, strformat, strtabs, streams, strutils, tables, tempfiles, times]
 import ../async_executor
 import ../collections
 import ../dcs
@@ -11,6 +11,7 @@ import ../log
 import ../psycopg
 import ../utils
 import ./misc
+import ./connection
 
 export misc
 
@@ -28,18 +29,31 @@ proc unquote*(value: string): string =
   return value
 
 type
+  PostgresqlPtr* = ref object
+    ## Forward declaration for Postgresql type
+    dataDir*: string
+    binDir*: string
+    connectionPool*: ConnectionPool
+
   Bootstrap* = ref object
     ## Bootstrap handler for PostgreSQL.
-    postgresql: pointer  # Postgresql - forward declaration
+    postgresql*: PostgresqlPtr
     runningCustomBootstrap: bool
     keepExistingRecoveryConf: bool
 
-proc newBootstrap*(postgresql: pointer): Bootstrap =
+proc newBootstrap*(postgresql: PostgresqlPtr): Bootstrap =
   ## Create a new Bootstrap instance.
   new(result)
   result.postgresql = postgresql
   result.runningCustomBootstrap = false
   result.keepExistingRecoveryConf = false
+
+proc pgCommand(self: Bootstrap, cmd: string): string =
+  ## Get the full path to a PostgreSQL command.
+  if self.postgresql != nil and self.postgresql.binDir.len > 0:
+    result = self.postgresql.binDir / cmd
+  else:
+    result = cmd
 
 proc isRunningCustomBootstrap*(self: Bootstrap): bool =
   ## Check if a custom bootstrap is running.
@@ -132,12 +146,13 @@ proc createReplicaWithPgBasebackup*(self: Bootstrap, cloneFrom: Member,
   ## :param cloneFrom: The member to clone from.
   ## :param env: Environment variables for the command.
   ## :returns: true if successful.
-  # This would call pg_basebackup to create the replica
-  # Simplified implementation
   logger.info(fmt"Creating replica from {cloneFrom.name} using pg_basebackup")
 
+  # Get data directory
+  let dataDir = if self.postgresql != nil: self.postgresql.dataDir else: "."
+
   # Build pg_basebackup command
-  var args = @["-D", ".", "-X", "stream", "--checkpoint=fast"]
+  var args = @["-D", dataDir, "-X", "stream", "--checkpoint=fast"]
 
   # Add connection options
   let connInfo = cloneFrom.connUrl
@@ -145,8 +160,34 @@ proc createReplicaWithPgBasebackup*(self: Bootstrap, cloneFrom: Member,
     args.add("-d")
     args.add(connInfo)
 
-  # Would execute pg_basebackup here
-  result = true
+  # Convert env table to StringTableRef
+  var envTable = newStringTable()
+  for key, val in env:
+    envTable[key] = val
+  # Add PATH to env if not set
+  if "PATH" notin envTable:
+    envTable["PATH"] = getEnv("PATH")
+
+  # Execute pg_basebackup
+  let pgBasebackup = self.pgCommand("pg_basebackup")
+  logger.info("Executing: " & pgBasebackup & " " & args.join(" "))
+
+  try:
+    let process = startProcess(pgBasebackup, args = args, env = envTable,
+                               options = {poUsePath, poStdErrToStdOut})
+    let exitCode = process.waitForExit()
+    let output = process.outputStream.readAll()
+    process.close()
+
+    if exitCode != 0:
+      logger.error(fmt"pg_basebackup failed with exit code {exitCode}: {output}")
+      return false
+
+    logger.info("pg_basebackup completed successfully")
+    result = true
+  except OSError as e:
+    logger.error(fmt"Failed to execute pg_basebackup: {e.msg}")
+    result = false
 
 proc bootstrap*(self: Bootstrap, config: JsonNode): bool =
   ## Bootstrap PostgreSQL instance.
@@ -190,8 +231,40 @@ proc bootstrap*(self: Bootstrap, config: JsonNode): bool =
       logger.warning(msg)
     )
 
-  # Would call initdb here
-  result = true
+  # Get data directory
+  let dataDir = if self.postgresql != nil: self.postgresql.dataDir else: ""
+  if dataDir.len == 0:
+    logger.error("Cannot bootstrap: data directory not set")
+    return false
+
+  # Build initdb args
+  var args = @["-D", dataDir]
+  args.add(initdbOptions)
+
+  # Set up environment
+  var envTable = newStringTable()
+  envTable["PATH"] = getEnv("PATH")
+
+  # Execute initdb
+  let initdb = self.pgCommand("initdb")
+  logger.info("Executing: " & initdb & " " & args.join(" "))
+
+  try:
+    let process = startProcess(initdb, args = args, env = envTable,
+                               options = {poUsePath, poStdErrToStdOut})
+    let exitCode = process.waitForExit()
+    let output = process.outputStream.readAll()
+    process.close()
+
+    if exitCode != 0:
+      logger.error(fmt"initdb failed with exit code {exitCode}: {output}")
+      return false
+
+    logger.info("initdb completed successfully")
+    result = true
+  except OSError as e:
+    logger.error(fmt"Failed to execute initdb: {e.msg}")
+    result = false
 
 proc postBootstrap*(self: Bootstrap, config: JsonNode, connParams: Table[string, string]): bool =
   ## Run post-bootstrap tasks.
@@ -242,6 +315,13 @@ proc createUsers*(self: Bootstrap, config: JsonNode): bool =
   if users.kind != JObject:
     return true
 
+  # Get database connection
+  if self.postgresql == nil or self.postgresql.connectionPool == nil:
+    logger.error("Cannot create users: no database connection available")
+    return false
+
+  let conn = self.postgresql.connectionPool.get("bootstrap")
+
   for username, userConfig in users.pairs:
     if userConfig.kind != JObject:
       continue
@@ -259,9 +339,19 @@ proc createUsers*(self: Bootstrap, config: JsonNode): bool =
           createSql.add(" " & opt.getStr())
 
     logger.info(fmt"Creating user: {username}")
-    # Would execute the SQL here
-
-  result = true
+    try:
+      discard conn.query(createSql)
+      logger.info(fmt"Successfully created user: {username}")
+    except PostgresConnectionException as e:
+      # User might already exist, log warning and continue
+      if "already exists" in e.msg:
+        logger.warning(fmt"User {username} already exists, skipping")
+      else:
+        logger.error(fmt"Failed to create user {username}: {e.msg}")
+        result = false
+    except CatchableError as e:
+      logger.error(fmt"Failed to create user {username}: {e.msg}")
+      result = false
 
 proc cloneWithBasebackup*(self: Bootstrap, cloneFrom: Member,
                           options: JsonNode = newJNull()): bool =

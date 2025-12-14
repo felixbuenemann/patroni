@@ -337,8 +337,47 @@ method generate*(self: RunningClusterConfigGenerator) =
 
   self.setSuParams()
 
-  # Would connect to database and query settings
-  # For now, set some defaults
+  # Connect to database and query settings
+  try:
+    let conn = connect(
+      host = self.parsedDsn.getOrDefault("host", ""),
+      port = self.parsedDsn.getOrDefault("port", "5432"),
+      user = self.parsedDsn.getOrDefault("user", "postgres"),
+      password = self.parsedDsn.getOrDefault("password", ""),
+      database = self.parsedDsn.getOrDefault("database", "postgres")
+    )
+    defer: conn.close()
+
+    # Query important PostgreSQL settings
+    let settingsQuery = """
+      SELECT name, setting FROM pg_settings
+      WHERE name IN ('data_directory', 'config_file', 'hba_file', 'ident_file',
+                     'max_connections', 'shared_buffers', 'wal_level', 'max_wal_senders',
+                     'max_replication_slots', 'hot_standby', 'listen_addresses', 'port')
+    """
+    let rows = conn.query(settingsQuery)
+    var pgParams = newJObject()
+    for row in rows:
+      if row.len >= 2:
+        let (name, setting) = (row[0], row[1])
+        case name
+        of "data_directory":
+          self.config["postgresql"]["data_dir"] = %setting
+        of "listen_addresses":
+          self.config["postgresql"]["listen"] = %setting
+        of "port":
+          self.config["postgresql"]["port"] = %setting
+        else:
+          pgParams[name] = %setting
+
+    if pgParams.len > 0:
+      self.config["postgresql"]["parameters"] = pgParams
+
+  except PostgresConnectionException as e:
+    logger.warning(fmt"Could not connect to database to query settings: {e.msg}")
+  except CatchableError as e:
+    logger.warning(fmt"Error querying database settings: {e.msg}")
+
   self.config["postgresql"]["bin_dir"] = %self.getBinDirFromRunningInstance()
 
 proc generateConfig*(outputFile: string, sample: bool, dsn: Option[string] = none(string)) =

@@ -399,6 +399,8 @@ proc setSynchronousStandbyNames*(self: SyncHandler, sync: seq[string],
   else:
     syncParam = ""
 
-  # Would call postgresql.config.setSynchronousStandbyNames(syncParam)
+  # Store the synchronous_standby_names value
+  # In a full implementation, this would update postgresql.auto.conf and trigger a reload
+  self.synchronousStandbyNames = syncParam
   logger.info(fmt"Setting synchronous_standby_names to '{syncParam}'")
 

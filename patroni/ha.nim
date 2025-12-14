@@ -258,9 +258,9 @@ proc isStandbyCluster*(self: Ha): bool =
 proc isLeader*(self: Ha): bool =
   ## Check if this node is the current leader.
   let cluster = self.cluster
-  if cluster != nil and cluster.leader != nil:
-    # Would need to check against our own member name
-    result = false  # Placeholder
+  if cluster != nil and cluster.leader != nil and cluster.leader.member != nil:
+    # Check if leader member name matches our own name
+    result = cluster.leader.member.name == self.dcs.name
   else:
     result = false
 
