@@ -1,10 +1,10 @@
 ## Abstraction layer for PostgreSQL database access.
 ##
 ## This module provides a PostgreSQL connection interface similar to Python's psycopg2/psycopg modules.
-## When the db_connector package is available, it uses real PostgreSQL connectivity via libpq.
-## Otherwise, it provides stub types for compilation.
+## Uses db_connector/db_postgres for real PostgreSQL connectivity via libpq.
 
 import std/[strutils, tables, options]
+import ../vendor/db_connector/db_postgres as pg
 
 # Type aliases for compatibility
 type
@@ -12,6 +12,7 @@ type
 
   Connection* = ref object
     ## PostgreSQL connection wrapper with additional metadata.
+    db: DbConn
     serverVersion*: int
     autocommit*: bool
     connString*: string
@@ -47,6 +48,14 @@ proc getParameterStatus*(conn: Connection, paramName: string): string =
   ##
   ## :param paramName: the name of the connection parameter.
   ## :returns: the value for the paramName or empty string.
+  if conn.db == nil or not conn.isConnected:
+    return ""
+  try:
+    let rows = conn.db.getAllRows(sql"SELECT current_setting($1)", paramName)
+    if rows.len > 0 and rows[0].len > 0:
+      return rows[0][0]
+  except DbError:
+    discard
   result = ""
 
 proc parseConninfo*(conninfo: string): Table[string, string] =
@@ -208,6 +217,15 @@ proc buildConnString(host: string = "", port: string = "", user: string = "",
 
   result = parts.join(" ")
 
+proc getServerVersion(conn: Connection) =
+  ## Get and parse server version.
+  try:
+    let rows = conn.db.getAllRows(sql"SHOW server_version_num")
+    if rows.len > 0 and rows[0].len > 0:
+      conn.serverVersion = parseInt(rows[0][0])
+  except DbError, ValueError:
+    conn.serverVersion = 0
+
 proc connect*(conninfo: string = "", host: string = "", port: string = "5432",
               user: string = "", password: string = "", database: string = "",
               options: string = "", replication: string = "",
@@ -231,30 +249,51 @@ proc connect*(conninfo: string = "", host: string = "", port: string = "5432",
   ## :param fallbackApplicationName: application name.
   ##
   ## :returns: a connection to the database.
-  ##
-  ## Note: This is a stub implementation. Real PostgreSQL connectivity
-  ## requires the db_connector package with libpq.
 
   new(result)
 
   var connStr = conninfo
-  if connStr.len == 0:
-    var finalOptions = options
-    if replication.len == 0 and fallbackApplicationName != "Patroni ctl":
-      if finalOptions.len > 0:
-        finalOptions &= " "
-      finalOptions &= "-c search_path=pg_catalog"
+  var finalHost = host
+  var finalPort = port
+  var finalUser = user
+  var finalPassword = password
+  var finalDatabase = database
 
-    connStr = buildConnString(host, port, user, password, database, finalOptions)
+  # Parse conninfo if provided
+  if connStr.len > 0:
+    let params = parseConninfo(connStr)
+    if "host" in params: finalHost = params["host"]
+    if "port" in params: finalPort = params["port"]
+    if "user" in params: finalUser = params["user"]
+    if "password" in params: finalPassword = params["password"]
+    if "dbname" in params: finalDatabase = params["dbname"]
+
+  # Build final connection string
+  var finalOptions = options
+  if replication.len == 0 and fallbackApplicationName != "Patroni ctl":
+    if finalOptions.len > 0:
+      finalOptions &= " "
+    finalOptions &= "-c search_path=pg_catalog"
+
+  connStr = buildConnString(finalHost, finalPort, finalUser, finalPassword, finalDatabase, finalOptions)
 
   result.autocommit = true
   result.connString = connStr
-  result.serverVersion = 150000  # Stub: PostgreSQL 15
-  result.isConnected = true
+  result.serverVersion = 0
+  result.isConnected = false
+
+  try:
+    result.db = pg.open(finalHost, finalUser, finalPassword, finalDatabase)
+    result.isConnected = true
+    result.getServerVersion()
+  except DbError as e:
+    raise newException(OperationalError, "Failed to connect: " & e.msg)
 
 proc close*(conn: Connection) =
   ## Close the database connection.
-  if conn != nil:
+  if conn != nil and conn.isConnected:
+    if conn.db != nil:
+      conn.db.close()
     conn.isConnected = false
 
 proc execute*(conn: Connection, query: string, args: varargs[string, `$`]): int64 =
@@ -264,11 +303,13 @@ proc execute*(conn: Connection, query: string, args: varargs[string, `$`]): int6
   ## :param args: query parameters.
   ##
   ## :returns: number of affected rows.
-  ##
-  ## Note: Stub implementation - returns 0.
   if not conn.isConnected:
     raise newException(OperationalError, "Connection is closed")
-  result = 0
+  try:
+    conn.db.exec(sql(query), args)
+    result = 0  # db_postgres doesn't return affected rows directly
+  except DbError as e:
+    raise newException(DatabaseError, e.msg)
 
 proc query*(conn: Connection, query: string, args: varargs[string, `$`]): seq[Row] =
   ## Execute a SQL query and return results.
@@ -277,11 +318,12 @@ proc query*(conn: Connection, query: string, args: varargs[string, `$`]): seq[Ro
   ## :param args: query parameters.
   ##
   ## :returns: sequence of result rows.
-  ##
-  ## Note: Stub implementation - returns empty results.
   if not conn.isConnected:
     raise newException(OperationalError, "Connection is closed")
-  result = @[]
+  try:
+    result = conn.db.getAllRows(sql(query), args)
+  except DbError as e:
+    raise newException(DatabaseError, e.msg)
 
 proc queryOne*(conn: Connection, query: string, args: varargs[string, `$`]): Option[Row] =
   ## Execute a SQL query and return the first row.
@@ -290,11 +332,16 @@ proc queryOne*(conn: Connection, query: string, args: varargs[string, `$`]): Opt
   ## :param args: query parameters.
   ##
   ## :returns: first result row or none.
-  ##
-  ## Note: Stub implementation - returns none.
   if not conn.isConnected:
     raise newException(OperationalError, "Connection is closed")
-  result = none(Row)
+  try:
+    let row = conn.db.getRow(sql(query), args)
+    if row.len > 0 and row[0].len > 0:
+      result = some(row)
+    else:
+      result = none(Row)
+  except DbError as e:
+    raise newException(DatabaseError, e.msg)
 
 proc getValue*(conn: Connection, query: string, args: varargs[string, `$`]): string =
   ## Execute a SQL query and return a single value.
@@ -303,11 +350,12 @@ proc getValue*(conn: Connection, query: string, args: varargs[string, `$`]): str
   ## :param args: query parameters.
   ##
   ## :returns: first column of first row.
-  ##
-  ## Note: Stub implementation - returns empty string.
   if not conn.isConnected:
     raise newException(OperationalError, "Connection is closed")
-  result = ""
+  try:
+    result = conn.db.getValue(sql(query), args)
+  except DbError as e:
+    raise newException(DatabaseError, e.msg)
 
 proc cursor*(conn: Connection): Cursor =
   ## Create a cursor for the connection.
@@ -349,11 +397,13 @@ proc fetchmany*(cursor: Cursor, size: int): seq[Row] =
 
 proc tryExec*(conn: Connection, query: string, args: varargs[string, `$`]): bool =
   ## Try to execute a SQL query, returning success status.
-  ##
-  ## Note: Stub implementation - returns true.
   if not conn.isConnected:
     return false
-  result = true
+  try:
+    conn.db.exec(sql(query), args)
+    result = true
+  except DbError:
+    result = false
 
 proc setAutocommit*(conn: Connection, value: bool) =
   ## Set autocommit mode.

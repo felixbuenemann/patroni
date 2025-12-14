@@ -6,6 +6,7 @@ import ./dcs
 import ./exceptions
 import ./log
 import ./utils
+import ../vendor/yaml/tojson
 
 let logger = getLogger("patroni.config")
 
@@ -143,17 +144,26 @@ proc buildEnvironmentConfiguration(): Table[string, JsonNode] =
 
 proc loadYamlFile(path: string): Table[string, JsonNode] =
   ## Load a YAML/JSON configuration file.
-  ## Note: For simplicity, we treat YAML as JSON here since JSON is valid YAML.
+  ## Uses NimYAML for proper YAML 1.2 parsing.
   result = initTable[string, JsonNode]()
   try:
     let content = readFile(path)
-    let parsed = parseJson(content)
-    if parsed.kind == JObject:
-      for key, value in parsed.pairs:
-        result[key] = value
+    # Use NimYAML to parse YAML and convert to JSON
+    let docs = loadToJson(content)
+    if docs.len > 0:
+      let parsed = docs[0]  # Take first document
+      if parsed.kind == JObject:
+        for key, value in parsed.pairs:
+          result[key] = value
   except IOError as e:
     logger.exception(fmt"Failed to load config file: {path}", e)
     raise newException(ConfigParseError, fmt"Cannot load config file: {path}")
+  except YamlParserError as e:
+    logger.exception(fmt"Failed to parse YAML config file: {path}", e)
+    raise newException(ConfigParseError, fmt"Invalid YAML in config file: {path}")
+  except YamlConstructionError as e:
+    logger.exception(fmt"Failed to construct config from YAML: {path}", e)
+    raise newException(ConfigParseError, fmt"Invalid config structure: {path}")
   except JsonParsingError as e:
     logger.exception(fmt"Failed to parse config file: {path}", e)
     raise newException(ConfigParseError, fmt"Invalid config file: {path}")
