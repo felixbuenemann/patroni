@@ -2,315 +2,336 @@ package patroni
 
 import (
 	"testing"
+	"time"
 )
 
-func TestPatroniInit(t *testing.T) {
-	tests := []struct {
-		name   string
-		config string
-		valid  bool
-	}{
-		{"valid config", "postgres0.yml", true},
-		{"empty config", "", false},
+func TestVersion(t *testing.T) {
+	if Version == "" {
+		t.Error("Version should not be empty")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			valid := tt.config != ""
-			if valid != tt.valid {
-				t.Errorf("Config %q valid = %v, want %v", tt.config, valid, tt.valid)
-			}
-		})
+	if Version != "4.0.0-go" {
+		t.Errorf("Version = %q, want %q", Version, "4.0.0-go")
 	}
 }
 
-func TestApplyDynamicConfiguration(t *testing.T) {
+func TestScheduledRestart(t *testing.T) {
 	tests := []struct {
 		name    string
-		ttl     int
-		initial int
-		final   int
+		restart *ScheduledRestart
 	}{
-		{"empty cluster uses default", 0, 0, 30},
-		{"cluster config override", 40, 30, 40},
+		{
+			name: "pending restart",
+			restart: &ScheduledRestart{
+				Schedule:            time.Now().Add(time.Hour),
+				PostmasterStartTime: time.Now(),
+				Pending:             true,
+			},
+		},
+		{
+			name: "completed restart",
+			restart: &ScheduledRestart{
+				Schedule:            time.Now().Add(-time.Hour),
+				PostmasterStartTime: time.Now(),
+				Pending:             false,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Test configuration application
-			if tt.ttl < 0 {
-				t.Error("TTL should not be negative")
+			if tt.restart.Schedule.IsZero() {
+				t.Error("Schedule should not be zero")
 			}
 		})
 	}
 }
 
+func TestOptions(t *testing.T) {
+	opts := Options{
+		ConfigFile: "/etc/patroni/postgres0.yml",
+		Validate:   true,
+	}
+
+	if opts.ConfigFile == "" {
+		t.Error("ConfigFile should be set")
+	}
+	if !opts.Validate {
+		t.Error("Validate should be true")
+	}
+}
+
+// TestFilterTags tests the filterTags function through a Patroni instance
 func TestFilterTags(t *testing.T) {
+	p := &Patroni{
+		tags: make(map[string]interface{}),
+	}
+
 	tests := []struct {
 		name     string
 		tags     map[string]interface{}
-		expected map[string]interface{}
+		contains string
+		absent   string
 	}{
 		{
 			name:     "remove false noloadbalance",
 			tags:     map[string]interface{}{"noloadbalance": false, "smth": "random"},
-			expected: map[string]interface{}{"smth": "random"},
+			contains: "smth",
+			absent:   "noloadbalance",
 		},
 		{
-			name:     "keep true clonefrom",
-			tags:     map[string]interface{}{"clonefrom": true, "smth": false},
-			expected: map[string]interface{}{"clonefrom": true, "smth": false},
+			name:     "keep true noloadbalance",
+			tags:     map[string]interface{}{"noloadbalance": true, "other": "value"},
+			contains: "noloadbalance",
 		},
 		{
-			name:     "nofailover with priority",
-			tags:     map[string]interface{}{"nofailover": false, "failover_priority": 0},
-			expected: map[string]interface{}{"nofailover": false, "failover_priority": 0},
+			name:     "keep non-bool noloadbalance",
+			tags:     map[string]interface{}{"noloadbalance": "maybe", "test": true},
+			contains: "noloadbalance",
+		},
+		{
+			name:     "nil tags",
+			tags:     nil,
+			contains: "",
+		},
+		{
+			name:     "empty tags",
+			tags:     map[string]interface{}{},
+			contains: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.tags == nil {
-				t.Error("Tags should not be nil")
+			result := p.filterTags(tt.tags)
+
+			if result == nil {
+				t.Fatal("filterTags should not return nil")
 			}
-		})
-	}
-}
 
-func TestNoLoadBalance(t *testing.T) {
-	tests := []struct {
-		name          string
-		noloadbalance interface{}
-		expected      bool
-	}{
-		{"true", true, true},
-		{"false", false, false},
-		{"nil", nil, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := false
-			if v, ok := tt.noloadbalance.(bool); ok {
-				result = v
-			}
-			if result != tt.expected {
-				t.Errorf("noloadbalance = %v, want %v", result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestNoFailover(t *testing.T) {
-	tests := []struct {
-		name             string
-		nofailover       interface{}
-		failoverPriority interface{}
-		expected         bool
-	}{
-		{"default", nil, nil, false},
-		{"nofailover true", true, 0, true},
-		{"nofailover true with priority", true, 1, true},
-		{"nofailover false", false, 0, false},
-		{"nofailover false with priority", false, 1, false},
-		{"priority 0", nil, 0, true},
-		{"priority 1", nil, 1, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Test nofailover logic
-			nofailover := false
-			if v, ok := tt.nofailover.(bool); ok {
-				nofailover = v
-			} else if tt.nofailover == nil {
-				if p, ok := tt.failoverPriority.(int); ok {
-					nofailover = p == 0
+			if tt.contains != "" {
+				if _, ok := result[tt.contains]; !ok {
+					t.Errorf("result should contain %q", tt.contains)
 				}
 			}
-			if nofailover != tt.expected {
-				t.Errorf("nofailover = %v, want %v", nofailover, tt.expected)
+
+			if tt.absent != "" {
+				if _, ok := result[tt.absent]; ok {
+					t.Errorf("result should not contain %q", tt.absent)
+				}
 			}
 		})
 	}
 }
 
-func TestFailoverPriority(t *testing.T) {
+// TestPatroniStructFields tests the Patroni struct fields
+func TestPatroniStructFields(t *testing.T) {
+	p := &Patroni{
+		tags:     make(map[string]interface{}),
+		nextRun:  time.Now(),
+		running:  false,
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
+		reloadCh: make(chan struct{}, 1),
+	}
+
+	if p.tags == nil {
+		t.Error("tags should be initialized")
+	}
+	if p.nextRun.IsZero() {
+		t.Error("nextRun should be set")
+	}
+	if p.running {
+		t.Error("running should be false initially")
+	}
+	if p.stopCh == nil {
+		t.Error("stopCh should be initialized")
+	}
+	if p.doneCh == nil {
+		t.Error("doneCh should be initialized")
+	}
+	if p.reloadCh == nil {
+		t.Error("reloadCh should be initialized")
+	}
+}
+
+// TestTags tests the Tags method
+func TestTags(t *testing.T) {
+	p := &Patroni{
+		tags: map[string]interface{}{
+			"nofailover": true,
+			"clonefrom":  true,
+		},
+	}
+
+	tags := p.Tags()
+	if tags == nil {
+		t.Fatal("Tags() should not return nil")
+	}
+	if tags["nofailover"] != true {
+		t.Error("nofailover tag should be true")
+	}
+	if tags["clonefrom"] != true {
+		t.Error("clonefrom tag should be true")
+	}
+}
+
+// TestIsRunning tests the IsRunning method
+func TestIsRunning(t *testing.T) {
+	p := &Patroni{
+		running: false,
+	}
+
+	if p.IsRunning() {
+		t.Error("IsRunning() should return false initially")
+	}
+
+	p.running = true
+	if !p.IsRunning() {
+		t.Error("IsRunning() should return true after setting running")
+	}
+}
+
+// TestWakeupHA tests the wakeupHA method
+func TestWakeupHA(t *testing.T) {
+	p := &Patroni{
+		reloadCh: make(chan struct{}, 1),
+	}
+
+	// First call should succeed
+	p.wakeupHA()
+
+	// Check channel has one message
+	select {
+	case <-p.reloadCh:
+		// Expected
+	default:
+		t.Error("wakeupHA should have sent a message")
+	}
+
+	// Call again and check it doesn't block
+	p.wakeupHA()
+	p.wakeupHA() // Second call when channel might be full should not block
+
+	// Verify channel has at most one message
+	select {
+	case <-p.reloadCh:
+		// Expected
+	default:
+		// Also OK if channel was empty
+	}
+}
+
+// Test filterTags with various noloadbalance values
+func TestFilterTagsNoLoadBalance(t *testing.T) {
+	p := &Patroni{}
+
 	tests := []struct {
-		name             string
-		nofailover       interface{}
-		failoverPriority interface{}
-		expected         int
+		name   string
+		input  interface{}
+		expect bool
 	}{
-		{"default", nil, nil, 1},
-		{"nofailover true", true, 0, 0},
-		{"nofailover true with priority", true, 1, 0},
-		{"nofailover false", false, nil, 1},
-		{"priority 0", nil, 0, 0},
-		{"priority 1", nil, 1, 1},
-		{"priority 2", nil, 2, 2},
+		{"true bool", true, true},
+		{"false bool", false, false},
+		{"string true", "true", true},
+		{"int zero", 0, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			priority := 1
-			if v, ok := tt.nofailover.(bool); ok && v {
-				priority = 0
-			} else if p, ok := tt.failoverPriority.(int); ok {
-				priority = p
-			}
-			if priority != tt.expected {
-				t.Errorf("failover_priority = %v, want %v", priority, tt.expected)
+			tags := map[string]interface{}{"noloadbalance": tt.input}
+			result := p.filterTags(tags)
+
+			_, present := result["noloadbalance"]
+			if tt.expect != present {
+				t.Errorf("noloadbalance presence = %v, want %v", present, tt.expect)
 			}
 		})
 	}
 }
 
-func TestReplicateFrom(t *testing.T) {
-	tests := []struct {
-		name     string
-		tag      string
-		expected string
-	}{
-		{"empty", "", ""},
-		{"set", "foo", "foo"},
+// Test concurrent access to Tags
+func TestTagsConcurrent(t *testing.T) {
+	p := &Patroni{
+		tags: map[string]interface{}{
+			"key": "value",
+		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.tag != tt.expected {
-				t.Errorf("replicatefrom = %q, want %q", tt.tag, tt.expected)
+	done := make(chan bool)
+
+	// Start multiple goroutines reading tags
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = p.Tags()
 			}
-		})
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 10; i++ {
+		<-done
 	}
 }
 
-func TestNoSync(t *testing.T) {
-	tests := []struct {
-		name     string
-		nosync   interface{}
-		expected bool
-	}{
-		{"true", true, true},
-		{"false", false, false},
-		{"nil", nil, false},
-	}
+// Test concurrent access to IsRunning
+func TestIsRunningConcurrent(t *testing.T) {
+	p := &Patroni{}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := false
-			if v, ok := tt.nosync.(bool); ok {
-				result = v
+	done := make(chan bool)
+
+	// Start multiple goroutines
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = p.IsRunning()
 			}
-			if result != tt.expected {
-				t.Errorf("nosync = %v, want %v", result, tt.expected)
-			}
-		})
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 10; i++ {
+		<-done
 	}
 }
 
-func TestNoStream(t *testing.T) {
-	tests := []struct {
-		name     string
-		nostream string
-		expected bool
-	}{
-		{"True string", "True", true},
-		{"None string", "None", false},
-		{"foo", "foo", false},
-		{"empty", "", false},
+// Benchmark tests
+func BenchmarkFilterTags(b *testing.B) {
+	p := &Patroni{}
+	tags := map[string]interface{}{
+		"noloadbalance": false,
+		"nofailover":    true,
+		"clonefrom":     true,
+		"custom":        "value",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := tt.nostream == "True"
-			if result != tt.expected {
-				t.Errorf("nostream = %v, want %v", result, tt.expected)
-			}
-		})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		p.filterTags(tags)
 	}
 }
 
-func TestScheduleNextRun(t *testing.T) {
-	tests := []struct {
-		name     string
-		loopWait int
-		nextRun  int64
-	}{
-		{"normal", 10, 0},
-		{"overdue", 10, -20},
+func BenchmarkTags(b *testing.B) {
+	p := &Patroni{
+		tags: map[string]interface{}{
+			"nofailover": true,
+			"clonefrom":  true,
+		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.loopWait <= 0 {
-				t.Error("loopWait should be positive")
-			}
-		})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		p.Tags()
 	}
 }
 
-func TestEnsureUniqueName(t *testing.T) {
-	tests := []struct {
-		name       string
-		memberName string
-		myName     string
-		reachable  bool
-		shouldFail bool
-	}{
-		{"different name", "distinct", "mynode", false, false},
-		{"same name not reachable", "mynode", "mynode", false, false},
-		{"same name reachable", "mynode", "mynode", true, true},
-	}
+func BenchmarkIsRunning(b *testing.B) {
+	p := &Patroni{running: true}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			conflict := tt.memberName == tt.myName && tt.reachable
-			if conflict != tt.shouldFail {
-				t.Errorf("conflict = %v, want %v", conflict, tt.shouldFail)
-			}
-		})
-	}
-}
-
-func TestSigtermHandler(t *testing.T) {
-	t.Run("sigterm triggers exit", func(t *testing.T) {
-		// SIGTERM should trigger graceful shutdown
-		t.Log("SIGTERM handler triggers SystemExit")
-	})
-}
-
-func TestSighupHandler(t *testing.T) {
-	t.Run("sighup reloads config", func(t *testing.T) {
-		// SIGHUP should reload configuration
-		t.Log("SIGHUP handler reloads configuration")
-	})
-}
-
-func TestShutdown(t *testing.T) {
-	t.Run("graceful shutdown", func(t *testing.T) {
-		// Shutdown should stop API and HA
-		t.Log("Shutdown stops API server and HA loop")
-	})
-}
-
-func TestMainLoop(t *testing.T) {
-	tests := []struct {
-		name      string
-		isLeader  bool
-		isPaused  bool
-		isRunning bool
-	}{
-		{"leader running", true, false, true},
-		{"replica running", false, false, true},
-		{"paused", false, true, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if !tt.isRunning {
-				t.Error("isRunning should be true")
-			}
-		})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		p.IsRunning()
 	}
 }
