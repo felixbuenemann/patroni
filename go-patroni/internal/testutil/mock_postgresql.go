@@ -5,6 +5,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/patroni/patroni-go/internal/postgresql"
 	"github.com/patroni/patroni-go/pkg/types"
 )
 
@@ -159,11 +160,11 @@ func (m *MockPostgresql) Start(ctx context.Context) error {
 }
 
 // Stop stops PostgreSQL.
-func (m *MockPostgresql) Stop(ctx context.Context, mode string) error {
+func (m *MockPostgresql) Stop(ctx context.Context, mode postgresql.StopMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.StopCalls++
-	m.LastStopMode = mode
+	m.LastStopMode = string(mode)
 
 	if m.StopErr != nil {
 		return m.StopErr

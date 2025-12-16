@@ -5,6 +5,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/patroni/patroni-go/internal/ha"
 	"github.com/patroni/patroni-go/pkg/types"
 )
 
@@ -16,7 +17,7 @@ type HAInterface interface {
 	GetCluster() *types.Cluster
 	GetConfig() map[string]interface{}
 	GetEffectiveTags() types.Tags
-	GetScheduledRestart() *ScheduledRestart
+	GetScheduledRestart() *ha.ScheduledRestart
 	ScheduleRestart(schedule time.Time, postmasterStartTime time.Time) error
 	CancelScheduledRestart() error
 	Reinitialize(ctx context.Context, force bool) error
@@ -25,12 +26,8 @@ type HAInterface interface {
 	SetConfig(ctx context.Context, cfg map[string]interface{}) error
 }
 
-// ScheduledRestart represents a scheduled restart (matches ha.ScheduledRestart).
-type ScheduledRestart struct {
-	Schedule            time.Time `json:"schedule"`
-	PostmasterStartTime time.Time `json:"postmaster_start_time,omitempty"`
-	Pending             bool      `json:"pending"`
-}
+// ScheduledRestart is an alias for ha.ScheduledRestart for backward compatibility.
+type ScheduledRestart = ha.ScheduledRestart
 
 // PostgreSQLInterface defines the PostgreSQL methods needed by the API server.
 type PostgreSQLInterface interface {

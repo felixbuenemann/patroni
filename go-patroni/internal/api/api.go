@@ -24,8 +24,8 @@ import (
 // Server implements the REST API server.
 type Server struct {
 	config     *config.Config
-	ha         *ha.HA
-	pg         *postgresql.Postgresql
+	ha         HAInterface
+	pg         PostgreSQLInterface
 	server     *http.Server
 	router     chi.Router
 	failsafe   map[string]string
@@ -33,6 +33,12 @@ type Server struct {
 
 // NewServer creates a new API server.
 func NewServer(haInstance *ha.HA, pg *postgresql.Postgresql, cfg *config.RestAPIConfig) *Server {
+	return NewServerWithInterfaces(haInstance, pg, cfg)
+}
+
+// NewServerWithInterfaces creates a new API server with interface-based dependencies.
+// This is useful for testing with mock implementations.
+func NewServerWithInterfaces(haInstance HAInterface, pg PostgreSQLInterface, cfg *config.RestAPIConfig) *Server {
 	s := &Server{
 		ha:       haInstance,
 		pg:       pg,

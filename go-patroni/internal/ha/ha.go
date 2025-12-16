@@ -40,7 +40,7 @@ type HA struct {
 	state  HAState
 	config *config.Config
 	dcs    dcs.DCS
-	pg     *postgresql.Postgresql
+	pg     PostgreSQLInterface
 
 	// Cluster state
 	cluster *types.Cluster
@@ -62,6 +62,12 @@ type HA struct {
 
 // New creates a new HA instance.
 func New(cfg *config.Config, d dcs.DCS, pg *postgresql.Postgresql) *HA {
+	return NewWithInterface(cfg, d, pg)
+}
+
+// NewWithInterface creates a new HA instance with a PostgreSQL interface.
+// This is useful for testing with mock PostgreSQL implementations.
+func NewWithInterface(cfg *config.Config, d dcs.DCS, pg PostgreSQLInterface) *HA {
 	return &HA{
 		state:    HAStateStarting,
 		config:   cfg,
@@ -690,7 +696,7 @@ func (ha *HA) Reinitialize(ctx context.Context, force bool) error {
 	log.Info().Bool("force", force).Msg("Reinitializing member")
 
 	// Stop PostgreSQL
-	if err := ha.pg.Stop(ctx, postgresql.StopModeFast); err != nil {
+	if err := ha.pg.Stop(ctx, StopModeFast); err != nil {
 		log.Warn().Err(err).Msg("Error stopping PostgreSQL during reinitialize")
 	}
 
