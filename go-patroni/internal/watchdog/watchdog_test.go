@@ -506,3 +506,160 @@ func TestConfigStruct(t *testing.T) {
 		t.Errorf("Config.SafetyMargin = %v, want %v", cfg.SafetyMargin, 10*time.Second)
 	}
 }
+
+func TestCalculateKeepaliveIntervalVerySmallTimeout(t *testing.T) {
+	w, _ := New(&Config{
+		Mode:         ModeOff,
+		SafetyMargin: 3 * time.Second,
+	})
+	// Set timeout smaller than safety margin - should result in 1 second minimum
+	w.timeout = 2 * time.Second
+
+	result := w.CalculateKeepaliveInterval(10 * time.Second)
+	if result != 1*time.Second {
+		t.Errorf("CalculateKeepaliveInterval() with small timeout = %v, want %v", result, 1*time.Second)
+	}
+}
+
+func TestWatchdogCloseWithoutOpen(t *testing.T) {
+	w, _ := New(&Config{Mode: ModeAutomatic})
+
+	// Close without ever opening
+	err := w.Close()
+	if err != nil {
+		t.Errorf("Close() without open should not error, got %v", err)
+	}
+}
+
+func TestWatchdogMonitorSetLeaderStateSameState(t *testing.T) {
+	cfg := &Config{Mode: ModeOff}
+	m, _ := NewWatchdogMonitor(cfg)
+
+	// Initially not leader
+	m.SetLeaderState(false)
+	// Set to false again - should be no-op
+	m.SetLeaderState(false)
+
+	// Now set to true
+	m.SetLeaderState(true)
+	// Set to true again - should be no-op
+	m.SetLeaderState(true)
+
+	// Back to false
+	m.SetLeaderState(false)
+}
+
+func TestWatchdogMonitorNilConfig(t *testing.T) {
+	m, err := NewWatchdogMonitor(nil)
+	if err != nil {
+		t.Fatalf("NewWatchdogMonitor(nil) error = %v", err)
+	}
+
+	if m == nil {
+		t.Fatal("NewWatchdogMonitor(nil) returned nil")
+	}
+
+	if m.watchdog == nil {
+		t.Error("WatchdogMonitor.watchdog should not be nil with nil config")
+	}
+}
+
+func TestWatchdogConcurrentAccess(t *testing.T) {
+	w, _ := New(&Config{Mode: ModeOff})
+
+	done := make(chan bool, 4)
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = w.IsActive()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = w.GetTimeout()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = w.Mode()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = w.CalculateKeepaliveInterval(10 * time.Second)
+		}
+		done <- true
+	}()
+
+	for i := 0; i < 4; i++ {
+		<-done
+	}
+}
+
+func TestWatchdogMonitorConcurrentAccess(t *testing.T) {
+	cfg := &Config{Mode: ModeOff}
+	m, _ := NewWatchdogMonitor(cfg)
+
+	done := make(chan bool, 3)
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			m.SetLeaderState(i%2 == 0)
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = m.IsActive()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = m.Keepalive()
+		}
+		done <- true
+	}()
+
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+}
+
+func TestIsAvailableWithDevNull(t *testing.T) {
+	// /dev/null exists on Linux
+	available := IsAvailable("/dev/null")
+	if !available {
+		t.Error("IsAvailable(\"/dev/null\") should return true since file exists")
+	}
+}
+
+func TestWatchdogAllModes(t *testing.T) {
+	modes := []string{ModeOff, ModeAutomatic, ModeRequired, "custom"}
+
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			cfg := &Config{
+				Mode:   mode,
+				Device: "/dev/nonexistent_watchdog",
+			}
+
+			w, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			if w.Mode() != mode {
+				t.Errorf("Mode() = %q, want %q", w.Mode(), mode)
+			}
+		})
+	}
+}

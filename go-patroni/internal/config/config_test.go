@@ -422,3 +422,947 @@ func TestLogConfig(t *testing.T) {
 		t.Errorf("Format = %q, want %q", cfg.Format, "text")
 	}
 }
+
+func TestGetDCSType(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       *Config
+		wantType     string
+		wantNil      bool
+	}{
+		{
+			name: "etcd3 configured",
+			config: &Config{
+				Scope:     "mycluster",
+				Name:      "node1",
+				Namespace: "/patroni/",
+				TTL:       30,
+				Etcd3:     &dcs.Config{Hosts: []string{"127.0.0.1:2379"}},
+			},
+			wantType: "etcd3",
+			wantNil:  false,
+		},
+		{
+			name: "etcd configured",
+			config: &Config{
+				Scope: "mycluster",
+				Name:  "node1",
+				Etcd:  &dcs.Config{Hosts: []string{"127.0.0.1:2379"}},
+			},
+			wantType: "etcd",
+			wantNil:  false,
+		},
+		{
+			name: "consul configured",
+			config: &Config{
+				Scope:  "mycluster",
+				Name:   "node1",
+				Consul: &dcs.Config{Host: "127.0.0.1:8500"},
+			},
+			wantType: "consul",
+			wantNil:  false,
+		},
+		{
+			name: "zookeeper configured",
+			config: &Config{
+				Scope:     "mycluster",
+				Name:      "node1",
+				ZooKeeper: &dcs.Config{Hosts: []string{"127.0.0.1:2181"}},
+			},
+			wantType: "zookeeper",
+			wantNil:  false,
+		},
+		{
+			name: "exhibitor configured",
+			config: &Config{
+				Scope:     "mycluster",
+				Name:      "node1",
+				Exhibitor: &dcs.Config{Hosts: []string{"127.0.0.1:8181"}},
+			},
+			wantType: "exhibitor",
+			wantNil:  false,
+		},
+		{
+			name: "kubernetes configured",
+			config: &Config{
+				Scope:      "mycluster",
+				Name:       "node1",
+				Kubernetes: &dcs.Config{Namespace: "default"},
+			},
+			wantType: "kubernetes",
+			wantNil:  false,
+		},
+		{
+			name: "raft configured",
+			config: &Config{
+				Scope: "mycluster",
+				Name:  "node1",
+				Raft:  &dcs.Config{Hosts: []string{"127.0.0.1:5254"}},
+			},
+			wantType: "raft",
+			wantNil:  false,
+		},
+		{
+			name: "no dcs configured",
+			config: &Config{
+				Scope: "mycluster",
+				Name:  "node1",
+			},
+			wantType: "",
+			wantNil:  true,
+		},
+		{
+			name: "etcd3 takes priority over etcd",
+			config: &Config{
+				Scope: "mycluster",
+				Name:  "node1",
+				Etcd:  &dcs.Config{Hosts: []string{"127.0.0.1:2379"}},
+				Etcd3: &dcs.Config{Hosts: []string{"127.0.0.1:2379"}},
+			},
+			wantType: "etcd3",
+			wantNil:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dcsType, dcsConfig := tt.config.GetDCSType()
+			if dcsType != tt.wantType {
+				t.Errorf("GetDCSType() type = %q, want %q", dcsType, tt.wantType)
+			}
+			if (dcsConfig == nil) != tt.wantNil {
+				t.Errorf("GetDCSType() config nil = %v, want %v", dcsConfig == nil, tt.wantNil)
+			}
+			// Verify common settings are populated
+			if dcsConfig != nil {
+				if dcsConfig.Scope != tt.config.Scope {
+					t.Errorf("DCSConfig.Scope = %q, want %q", dcsConfig.Scope, tt.config.Scope)
+				}
+				if dcsConfig.Name != tt.config.Name {
+					t.Errorf("DCSConfig.Name = %q, want %q", dcsConfig.Name, tt.config.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestGetAPIURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantURL string
+	}{
+		{
+			name: "with connect address",
+			config: &Config{
+				RestAPI: RestAPIConfig{
+					Listen:         "0.0.0.0:8008",
+					ConnectAddress: "192.168.1.100:8008",
+				},
+			},
+			wantURL: "http://192.168.1.100:8008",
+		},
+		{
+			name: "without connect address",
+			config: &Config{
+				RestAPI: RestAPIConfig{
+					Listen: "0.0.0.0:8008",
+				},
+			},
+			wantURL: "http://0.0.0.0:8008",
+		},
+		{
+			name: "with TLS",
+			config: &Config{
+				RestAPI: RestAPIConfig{
+					Listen:         "0.0.0.0:8008",
+					ConnectAddress: "secure.example.com:8008",
+					CertFile:       "/etc/ssl/certs/patroni.crt",
+				},
+			},
+			wantURL: "https://secure.example.com:8008",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := tt.config.GetAPIURL()
+			if url != tt.wantURL {
+				t.Errorf("GetAPIURL() = %q, want %q", url, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestGetConnectionURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantURL string
+	}{
+		{
+			name: "with connect address and user",
+			config: &Config{
+				PostgreSQL: PostgreSQLConfig{
+					Listen:         "0.0.0.0:5432",
+					ConnectAddress: "192.168.1.100:5432",
+					Authentication: AuthConfig{
+						Superuser: UserAuth{Username: "admin"},
+					},
+				},
+			},
+			wantURL: "postgres://admin@192.168.1.100:5432/postgres",
+		},
+		{
+			name: "without connect address",
+			config: &Config{
+				PostgreSQL: PostgreSQLConfig{
+					Listen: "0.0.0.0:5432",
+				},
+			},
+			wantURL: "postgres://postgres@0.0.0.0:5432/postgres",
+		},
+		{
+			name: "without port in address",
+			config: &Config{
+				PostgreSQL: PostgreSQLConfig{
+					Listen: "localhost",
+				},
+			},
+			wantURL: "postgres://postgres@localhost:5432/postgres",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := tt.config.GetConnectionURL()
+			if url != tt.wantURL {
+				t.Errorf("GetConnectionURL() = %q, want %q", url, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestGetDataDir(t *testing.T) {
+	cfg := &Config{
+		PostgreSQL: PostgreSQLConfig{
+			DataDir: "/data/postgresql",
+		},
+	}
+
+	dataDir := cfg.GetDataDir()
+	if dataDir != "/data/postgresql" {
+		t.Errorf("GetDataDir() = %q, want %q", dataDir, "/data/postgresql")
+	}
+}
+
+func TestSaveAndLoadDynamicConfig(t *testing.T) {
+	// Create a temporary directory
+	tmpDir, err := os.MkdirTemp("", "patroni-dynamic-config")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &Config{
+		PostgreSQL: PostgreSQLConfig{
+			DataDir: tmpDir,
+		},
+	}
+
+	// Test saving dynamic config
+	dynamicConfig := map[string]interface{}{
+		"ttl":       60,
+		"loop_wait": 15,
+		"postgresql": map[string]interface{}{
+			"parameters": map[string]interface{}{
+				"max_connections": 100,
+			},
+		},
+	}
+
+	if err := cfg.SaveDynamicConfig(dynamicConfig); err != nil {
+		t.Fatalf("SaveDynamicConfig() error = %v", err)
+	}
+
+	// Verify file was created
+	path := filepath.Join(tmpDir, "patroni.dynamic.json")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Errorf("Dynamic config file was not created at %s", path)
+	}
+
+	// Test loading dynamic config
+	loadedConfig, err := cfg.LoadDynamicConfig()
+	if err != nil {
+		t.Fatalf("LoadDynamicConfig() error = %v", err)
+	}
+
+	if loadedConfig == nil {
+		t.Fatal("LoadDynamicConfig() returned nil")
+	}
+
+	// Check values
+	if ttl, ok := loadedConfig["ttl"].(int); !ok || ttl != 60 {
+		t.Errorf("LoadDynamicConfig() ttl = %v, want 60", loadedConfig["ttl"])
+	}
+	if loopWait, ok := loadedConfig["loop_wait"].(int); !ok || loopWait != 15 {
+		t.Errorf("LoadDynamicConfig() loop_wait = %v, want 15", loadedConfig["loop_wait"])
+	}
+}
+
+func TestLoadDynamicConfigNotExists(t *testing.T) {
+	// Create a temporary directory
+	tmpDir, err := os.MkdirTemp("", "patroni-dynamic-config-empty")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &Config{
+		PostgreSQL: PostgreSQLConfig{
+			DataDir: tmpDir,
+		},
+	}
+
+	// Test loading non-existent dynamic config
+	loadedConfig, err := cfg.LoadDynamicConfig()
+	if err != nil {
+		t.Errorf("LoadDynamicConfig() error = %v, want nil", err)
+	}
+	if loadedConfig != nil {
+		t.Errorf("LoadDynamicConfig() = %v, want nil for non-existent file", loadedConfig)
+	}
+}
+
+func TestParseIntWithUnits(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    int64
+		wantErr bool
+	}{
+		{"empty string", "", 0, false},
+		{"plain number", "1234", 1234, false},
+		{"with spaces", "  5678  ", 5678, false},
+		{"kilobytes K", "10K", 10 * 1024, false},
+		{"kilobytes lowercase k", "10k", 10 * 1024, false},
+		{"megabytes M", "5M", 5 * 1024 * 1024, false},
+		{"gigabytes G", "2G", 2 * 1024 * 1024 * 1024, false},
+		{"terabytes T", "1T", 1 * 1024 * 1024 * 1024 * 1024, false},
+		{"invalid number", "abc", 0, true},
+		{"invalid suffix", "10X", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIntWithUnits(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseIntWithUnits(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ParseIntWithUnits(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseAddressEdgeCases(t *testing.T) {
+	// Test via GetConnectionURL with various address formats
+	tests := []struct {
+		name     string
+		listen   string
+		wantHost string
+		wantPort string
+	}{
+		{"host:port", "localhost:5433", "localhost", "5433"},
+		{"ip:port", "192.168.1.1:5432", "192.168.1.1", "5432"},
+		{"only host", "localhost", "localhost", "5432"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				PostgreSQL: PostgreSQLConfig{
+					Listen: tt.listen,
+				},
+			}
+			url := cfg.GetConnectionURL()
+			expected := "postgres://postgres@" + tt.wantHost + ":" + tt.wantPort + "/postgres"
+			if url != expected {
+				t.Errorf("GetConnectionURL() = %q, want %q", url, expected)
+			}
+		})
+	}
+}
+
+func TestLoadConfigInvalidFile(t *testing.T) {
+	// Test loading from a non-existent file
+	_, err := Load("/nonexistent/path/to/config.yml")
+	if err == nil {
+		t.Error("Load() should return error for non-existent file")
+	}
+}
+
+func TestLoadConfigInvalidYAML(t *testing.T) {
+	// Create a temporary config file with invalid YAML
+	tmpDir, err := os.MkdirTemp("", "patroni-config")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configFile := filepath.Join(tmpDir, "invalid.yml")
+	invalidContent := `
+scope: batman
+  invalid yaml indent
+name: node1
+`
+	if err := os.WriteFile(configFile, []byte(invalidContent), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	_, err = Load(configFile)
+	if err == nil {
+		t.Error("Load() should return error for invalid YAML")
+	}
+}
+
+func TestValidateMultipleDCS(t *testing.T) {
+	// Test that multiple DCS configurations generate a warning but don't fail
+	cfg := &Config{
+		Scope: "mycluster",
+		Name:  "node1",
+		PostgreSQL: PostgreSQLConfig{
+			DataDir: "/data/postgres",
+		},
+		Etcd:  &dcs.Config{Hosts: []string{"127.0.0.1:2379"}},
+		Etcd3: &dcs.Config{Hosts: []string{"127.0.0.1:2379"}},
+	}
+
+	// Should not return an error, just warn
+	err := cfg.Validate()
+	if err != nil {
+		t.Errorf("Validate() with multiple DCS should not return error, got: %v", err)
+	}
+}
+
+func TestLoadWithDefaults(t *testing.T) {
+	// Create a minimal config file to test defaults
+	tmpDir, err := os.MkdirTemp("", "patroni-config")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configFile := filepath.Join(tmpDir, "patroni.yml")
+	configContent := `
+scope: testcluster
+name: node1
+postgresql:
+  data_dir: /data/postgres
+etcd3:
+  hosts:
+    - 127.0.0.1:2379
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	cfg, err := Load(configFile)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Check defaults were applied
+	if cfg.TTL != 30 {
+		t.Errorf("Default TTL = %d, want 30", cfg.TTL)
+	}
+	if cfg.LoopWait != 10 {
+		t.Errorf("Default LoopWait = %d, want 10", cfg.LoopWait)
+	}
+	if cfg.RetryTimeout != 10 {
+		t.Errorf("Default RetryTimeout = %d, want 10", cfg.RetryTimeout)
+	}
+	if cfg.Namespace != "/service/" {
+		t.Errorf("Default Namespace = %q, want /service/", cfg.Namespace)
+	}
+	if cfg.Watchdog.Mode != "automatic" {
+		t.Errorf("Default Watchdog.Mode = %q, want automatic", cfg.Watchdog.Mode)
+	}
+}
+
+func TestLoadWithEnvOverrides(t *testing.T) {
+	// Create a config file
+	tmpDir, err := os.MkdirTemp("", "patroni-config")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configFile := filepath.Join(tmpDir, "patroni.yml")
+	configContent := `
+scope: originalscope
+name: originalname
+postgresql:
+  data_dir: /data/postgres
+etcd3:
+  hosts:
+    - 127.0.0.1:2379
+`
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	// Set environment variables
+	os.Setenv("PATRONI_SCOPE", "envscope")
+	os.Setenv("PATRONI_NAME", "envname")
+	os.Setenv("PATRONI_TTL", "60")
+	defer func() {
+		os.Unsetenv("PATRONI_SCOPE")
+		os.Unsetenv("PATRONI_NAME")
+		os.Unsetenv("PATRONI_TTL")
+	}()
+
+	cfg, err := Load(configFile)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Environment should override config file
+	if cfg.Scope != "envscope" {
+		t.Errorf("Scope = %q, want envscope", cfg.Scope)
+	}
+	if cfg.Name != "envname" {
+		t.Errorf("Name = %q, want envname", cfg.Name)
+	}
+}
+
+func TestSaveDynamicConfigError(t *testing.T) {
+	// Test saving to a non-existent directory
+	cfg := &Config{
+		PostgreSQL: PostgreSQLConfig{
+			DataDir: "/nonexistent/path",
+		},
+	}
+
+	err := cfg.SaveDynamicConfig(map[string]interface{}{"ttl": 60})
+	if err == nil {
+		t.Error("SaveDynamicConfig() should return error for non-existent directory")
+	}
+}
+
+func TestLoadDynamicConfigInvalidYAML(t *testing.T) {
+	// Create a temporary directory
+	tmpDir, err := os.MkdirTemp("", "patroni-dynamic-config-invalid")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &Config{
+		PostgreSQL: PostgreSQLConfig{
+			DataDir: tmpDir,
+		},
+	}
+
+	// Write invalid YAML
+	path := filepath.Join(tmpDir, "patroni.dynamic.json")
+	if err := os.WriteFile(path, []byte("{{invalid yaml"), 0600); err != nil {
+		t.Fatalf("Failed to write invalid config: %v", err)
+	}
+
+	_, err = cfg.LoadDynamicConfig()
+	if err == nil {
+		t.Error("LoadDynamicConfig() should return error for invalid YAML")
+	}
+}
+
+func TestConfigConcurrentAccess(t *testing.T) {
+	cfg := &Config{
+		Scope:     "testcluster",
+		Name:      "node1",
+		Namespace: "/patroni/",
+		TTL:       30,
+		PostgreSQL: PostgreSQLConfig{
+			DataDir:        "/data/postgres",
+			Listen:         "0.0.0.0:5432",
+			ConnectAddress: "127.0.0.1:5432",
+		},
+		RestAPI: RestAPIConfig{
+			Listen:         "0.0.0.0:8008",
+			ConnectAddress: "127.0.0.1:8008",
+		},
+		Etcd3: &dcs.Config{Hosts: []string{"127.0.0.1:2379"}},
+	}
+
+	// Test concurrent reads don't cause race conditions
+	done := make(chan bool, 4)
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = cfg.GetDataDir()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = cfg.GetAPIURL()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = cfg.GetConnectionURL()
+		}
+		done <- true
+	}()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_, _ = cfg.GetDCSType()
+		}
+		done <- true
+	}()
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 4; i++ {
+		<-done
+	}
+}
+
+// Generator tests
+
+func TestGetAddress(t *testing.T) {
+	hostname, ip := GetAddress()
+
+	// Hostname should be non-empty (or #FIXME if lookup fails)
+	if hostname == "" {
+		t.Error("GetAddress() returned empty hostname")
+	}
+
+	// IP should be non-empty (or #FIXME if lookup fails)
+	if ip == "" {
+		t.Error("GetAddress() returned empty IP")
+	}
+}
+
+func TestNewConfigGenerator(t *testing.T) {
+	gen := NewConfigGenerator("/tmp/patroni.yml")
+
+	if gen.OutputFile != "/tmp/patroni.yml" {
+		t.Errorf("OutputFile = %q, want /tmp/patroni.yml", gen.OutputFile)
+	}
+	if gen.Config == nil {
+		t.Fatal("Config should not be nil")
+	}
+	if gen.Config.Scope != NoValueMsg {
+		t.Errorf("Scope = %q, want %q", gen.Config.Scope, NoValueMsg)
+	}
+	if gen.Config.Namespace != "/patroni" {
+		t.Errorf("Namespace = %q, want /patroni", gen.Config.Namespace)
+	}
+	if gen.Config.PostgreSQL == nil {
+		t.Error("PostgreSQL config should not be nil")
+	}
+	if gen.Config.RestAPI == nil {
+		t.Error("RestAPI config should not be nil")
+	}
+}
+
+func TestConfigGeneratorSetDCS(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	gen.SetDCS("etcd3", map[string]interface{}{"hosts": []string{"127.0.0.1:2379"}})
+
+	if gen.Config.DCS == nil {
+		t.Fatal("DCS should not be nil after SetDCS")
+	}
+	etcd3, ok := gen.Config.DCS["etcd3"].(map[string]interface{})
+	if !ok {
+		t.Fatal("etcd3 config should be a map")
+	}
+	hosts, ok := etcd3["hosts"].([]string)
+	if !ok || len(hosts) != 1 {
+		t.Errorf("etcd3 hosts = %v, want [127.0.0.1:2379]", hosts)
+	}
+}
+
+func TestConfigGeneratorSetEtcd(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	gen.SetEtcd([]string{"127.0.0.1:2379", "127.0.0.1:2380"})
+
+	if gen.Config.DCS == nil {
+		t.Fatal("DCS should not be nil after SetEtcd")
+	}
+	etcd3, ok := gen.Config.DCS["etcd3"].(map[string]interface{})
+	if !ok {
+		t.Fatal("etcd3 config should be a map")
+	}
+	hosts, ok := etcd3["hosts"].([]string)
+	if !ok || len(hosts) != 2 {
+		t.Errorf("etcd3 hosts = %v, want 2 hosts", hosts)
+	}
+}
+
+func TestConfigGeneratorSetConsul(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	gen.SetConsul("127.0.0.1:8500")
+
+	if gen.Config.DCS == nil {
+		t.Fatal("DCS should not be nil after SetConsul")
+	}
+	consul, ok := gen.Config.DCS["consul"].(map[string]interface{})
+	if !ok {
+		t.Fatal("consul config should be a map")
+	}
+	host, ok := consul["host"].(string)
+	if !ok || host != "127.0.0.1:8500" {
+		t.Errorf("consul host = %v, want 127.0.0.1:8500", host)
+	}
+}
+
+func TestConfigGeneratorSetZooKeeper(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	gen.SetZooKeeper([]string{"127.0.0.1:2181"})
+
+	if gen.Config.DCS == nil {
+		t.Fatal("DCS should not be nil after SetZooKeeper")
+	}
+	zk, ok := gen.Config.DCS["zookeeper"].(map[string]interface{})
+	if !ok {
+		t.Fatal("zookeeper config should be a map")
+	}
+	hosts, ok := zk["hosts"].([]string)
+	if !ok || len(hosts) != 1 {
+		t.Errorf("zookeeper hosts = %v, want [127.0.0.1:2181]", hosts)
+	}
+}
+
+func TestConfigGeneratorSetBootstrap(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	dcsConfig := map[string]interface{}{"ttl": 30}
+	initdb := []map[string]interface{}{
+		{"encoding": "UTF8"},
+		{"locale": "en_US.UTF-8"},
+	}
+
+	gen.SetBootstrap(dcsConfig, initdb)
+
+	if gen.Config.Bootstrap == nil {
+		t.Fatal("Bootstrap should not be nil after SetBootstrap")
+	}
+	if _, ok := gen.Config.Bootstrap["dcs"]; !ok {
+		t.Error("Bootstrap should contain dcs")
+	}
+	if _, ok := gen.Config.Bootstrap["initdb"]; !ok {
+		t.Error("Bootstrap should contain initdb")
+	}
+}
+
+func TestConfigGeneratorSetBootstrapEmptyInitdb(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	dcsConfig := map[string]interface{}{"ttl": 30}
+
+	gen.SetBootstrap(dcsConfig, nil)
+
+	if gen.Config.Bootstrap == nil {
+		t.Fatal("Bootstrap should not be nil after SetBootstrap")
+	}
+	if _, ok := gen.Config.Bootstrap["initdb"]; ok {
+		t.Error("Bootstrap should not contain initdb when empty")
+	}
+}
+
+func TestConfigGeneratorDetectPostgreSQLBinDir(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	// This will return #FIXME in most test environments
+	binDir := gen.DetectPostgreSQLBinDir()
+
+	// Should return something (either a path or #FIXME)
+	if binDir == "" {
+		t.Error("DetectPostgreSQLBinDir() returned empty string")
+	}
+}
+
+func TestConfigGeneratorDetectDataDirectory(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	// This will return #FIXME in most test environments
+	dataDir := gen.DetectDataDirectory()
+
+	// Should return something (either a path or #FIXME)
+	if dataDir == "" {
+		t.Error("DetectDataDirectory() returned empty string")
+	}
+}
+
+func TestConfigGeneratorDetectDataDirectoryFromEnv(t *testing.T) {
+	gen := NewConfigGenerator("")
+
+	// Set PGDATA environment variable
+	os.Setenv("PGDATA", "/custom/data/dir")
+	defer os.Unsetenv("PGDATA")
+
+	dataDir := gen.DetectDataDirectory()
+
+	if dataDir != "/custom/data/dir" {
+		t.Errorf("DetectDataDirectory() = %q, want /custom/data/dir", dataDir)
+	}
+}
+
+func TestConfigGeneratorGenerate(t *testing.T) {
+	// Create a temporary directory
+	tmpDir, err := os.MkdirTemp("", "patroni-gen")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	outputFile := filepath.Join(tmpDir, "patroni.yml")
+	gen := NewConfigGenerator(outputFile)
+	gen.SetEtcd([]string{"127.0.0.1:2379"})
+
+	data, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Error("Generate() returned empty data")
+	}
+
+	// Verify file was written
+	if _, err := os.Stat(outputFile); os.IsNotExist(err) {
+		t.Error("Generate() did not create output file")
+	}
+}
+
+func TestConfigGeneratorGenerateNoFile(t *testing.T) {
+	gen := NewConfigGenerator("") // Empty output file
+	gen.SetEtcd([]string{"127.0.0.1:2379"})
+
+	data, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Error("Generate() returned empty data")
+	}
+}
+
+func TestConfigGeneratorGenerateError(t *testing.T) {
+	gen := NewConfigGenerator("/nonexistent/dir/patroni.yml")
+	gen.SetEtcd([]string{"127.0.0.1:2379"})
+
+	_, err := gen.Generate()
+	if err == nil {
+		t.Error("Generate() should return error for non-writable path")
+	}
+}
+
+func TestNewRunningPostgreSQLGenerator(t *testing.T) {
+	gen := NewRunningPostgreSQLGenerator("postgres://user:pass@localhost:5432/db", "/tmp/output.yml")
+
+	if gen.DSN != "postgres://user:pass@localhost:5432/db" {
+		t.Errorf("DSN = %q, want postgres://user:pass@localhost:5432/db", gen.DSN)
+	}
+	if gen.ConfigGenerator == nil {
+		t.Error("ConfigGenerator should not be nil")
+	}
+	if gen.OutputFile != "/tmp/output.yml" {
+		t.Errorf("OutputFile = %q, want /tmp/output.yml", gen.OutputFile)
+	}
+}
+
+func TestParseDSN(t *testing.T) {
+	tests := []struct {
+		name     string
+		dsn      string
+		wantKeys map[string]string
+	}{
+		{
+			name: "URI format with user and password",
+			dsn:  "postgres://user:pass@localhost:5432/mydb",
+			wantKeys: map[string]string{
+				"user":     "user",
+				"password": "pass",
+				"host":     "localhost",
+				"port":     "5432",
+				"dbname":   "mydb",
+			},
+		},
+		{
+			name: "URI format without password",
+			dsn:  "postgres://user@localhost:5432/mydb",
+			wantKeys: map[string]string{
+				"user":   "user",
+				"host":   "localhost",
+				"port":   "5432",
+				"dbname": "mydb",
+			},
+		},
+		{
+			name: "postgresql URI prefix",
+			dsn:  "postgresql://user:pass@localhost:5432/mydb",
+			wantKeys: map[string]string{
+				"user":     "user",
+				"password": "pass",
+				"host":     "localhost",
+				"port":     "5432",
+				"dbname":   "mydb",
+			},
+		},
+		{
+			name: "key=value format",
+			dsn:  "host=localhost port=5432 dbname=mydb user=admin password=secret",
+			wantKeys: map[string]string{
+				"host":     "localhost",
+				"port":     "5432",
+				"dbname":   "mydb",
+				"user":     "admin",
+				"password": "secret",
+			},
+		},
+		{
+			name: "URI without port",
+			dsn:  "postgres://user@localhost/mydb",
+			wantKeys: map[string]string{
+				"user":   "user",
+				"host":   "localhost",
+				"dbname": "mydb",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ParseDSN(tt.dsn)
+			for key, want := range tt.wantKeys {
+				if got, ok := result[key]; !ok || got != want {
+					t.Errorf("ParseDSN(%q)[%q] = %q, want %q", tt.dsn, key, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestAuthParameters(t *testing.T) {
+	// Verify AuthParameters map has expected entries
+	expectedParams := []string{"user", "password", "sslmode", "sslcert", "sslkey", "sslrootcert"}
+
+	for _, param := range expectedParams {
+		if _, ok := AuthParameters[param]; !ok {
+			t.Errorf("AuthParameters missing key %q", param)
+		}
+	}
+}
