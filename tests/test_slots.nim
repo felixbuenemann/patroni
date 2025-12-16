@@ -132,25 +132,25 @@ suite "Slots - SlotsAdvanceThread":
     check slots2.len == 0
 
 suite "Slots - SlotsHandler Methods":
-  test "createPhysicalReplicationSlot returns true":
+  test "createPhysicalReplicationSlot returns false without postgresql":
     let handler = newSlotsHandler(nil)
-    check handler.createPhysicalReplicationSlot("test_slot") == true
+    check handler.createPhysicalReplicationSlot("test_slot") == false
 
-  test "createPhysicalReplicationSlot with immediately_reserve":
+  test "createPhysicalReplicationSlot with immediately_reserve returns false without postgresql":
     let handler = newSlotsHandler(nil)
-    check handler.createPhysicalReplicationSlot("test_slot", true) == true
+    check handler.createPhysicalReplicationSlot("test_slot", true) == false
 
-  test "createLogicalReplicationSlot returns true":
+  test "createLogicalReplicationSlot returns false without postgresql":
     let handler = newSlotsHandler(nil)
-    check handler.createLogicalReplicationSlot("test_slot", "mydb", "pgoutput") == true
+    check handler.createLogicalReplicationSlot("test_slot", "mydb", "pgoutput") == false
 
-  test "dropReplicationSlot returns true":
+  test "dropReplicationSlot returns false without postgresql":
     let handler = newSlotsHandler(nil)
-    check handler.dropReplicationSlot("test_slot") == true
+    check handler.dropReplicationSlot("test_slot") == false
 
-  test "advanceReplicationSlot returns true":
+  test "advanceReplicationSlot returns false without postgresql":
     let handler = newSlotsHandler(nil)
-    check handler.advanceReplicationSlot("test_slot", 100) == true
+    check handler.advanceReplicationSlot("test_slot", 100) == false
 
   test "onDemote clears advance thread":
     let handler = newSlotsHandler(nil)

@@ -166,10 +166,11 @@ suite "Rewind - checkLeaderIsNotInRecovery":
     check result.isNone
 
 suite "Rewind - checkLeaderHasRunCheckpoint":
-  test "returns none for empty connection":
+  test "returns error for invalid connection":
     var connKwargs = initTable[string, string]()
     let result = checkLeaderHasRunCheckpoint(connKwargs)
-    check result.isNone
+    # Without valid connection, should return an error message
+    check result.isSome
 
 when isMainModule:
   discard
