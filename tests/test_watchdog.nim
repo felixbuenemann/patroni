@@ -1,6 +1,6 @@
 ## Tests for patroni/watchdog module.
 
-import std/[json, options, tables, unittest]
+import std/[json, options, strutils, tables, unittest]
 import ../patroni/watchdog
 
 # Helper to create a properly initialized WatchdogConfig
@@ -162,10 +162,16 @@ suite "Watchdog - WatchdogConfig":
     let impl = wc.getImpl()
     check impl != nil
 
-  test "WatchdogConfig getImpl returns NullWatchdog":
+  test "WatchdogConfig getImpl returns platform-appropriate implementation":
     let wc = createWatchdogConfig(driver = "default")
     let impl = wc.getImpl()
-    check impl.isNull == true
+    # On Linux, returns LinuxWatchdogDevice (not null)
+    # On other platforms, returns NullWatchdog (isNull = true)
+    when defined(linux):
+      check impl.isNull == false
+      check impl.describe().startsWith("LinuxWatchdogDevice")
+    else:
+      check impl.isNull == true
 
   test "WatchdogConfig driverConfig can be set":
     let wc = createWatchdogConfig()

@@ -309,8 +309,40 @@ proc getLocalTimelineLsnFromControldata(self: Rewind): tuple[inRecovery: Option[
 
 proc getLocalTimelineLsn(self: Rewind): tuple[inRecovery: Option[bool], timeline: Option[int], lsn: Option[int64]] =
   ## Get local timeline and LSN.
-  # Would check if postgresql is running and get from replication connection
-  # Otherwise analyze pg_controldata output
+  ## First tries to query running PostgreSQL via connection, then falls back to pg_controldata.
+
+  # Try to get from running PostgreSQL via connection pool
+  if self.postgresql != nil and self.postgresql.connectionPool != nil:
+    try:
+      let conn = self.postgresql.connectionPool.get("rewind")
+      # Query timeline and LSN from running instance
+      let query = """
+        SELECT pg_catalog.pg_is_in_recovery(),
+               pg_catalog.pg_control_checkpoint()::text
+      """
+      let rows = conn.query(query)
+      if rows.len > 0 and rows[0].len >= 2:
+        let inRecoveryStr = rows[0][0]
+        result.inRecovery = some(inRecoveryStr == "t" or inRecoveryStr.toLowerAscii() == "true")
+
+        # Parse checkpoint info - format: "(timeline,lsn,...)"
+        let checkpointStr = rows[0][1]
+        if checkpointStr.startsWith("(") and "," in checkpointStr:
+          let parts = checkpointStr[1..^2].split(",")
+          if parts.len >= 2:
+            try:
+              result.timeline = some(parseInt(parts[0]))
+              result.lsn = some(int64(parseLsn(parts[1])))
+              logger.info(fmt"Got timeline/LSN from running PostgreSQL: timeline={result.timeline.get} lsn={formatLsn(result.lsn.get)}")
+              return
+            except ValueError:
+              discard
+    except PostgresConnectionException as e:
+      logger.debug(fmt"Could not query running PostgreSQL: {e.msg}, falling back to pg_controldata")
+    except CatchableError as e:
+      logger.debug(fmt"Error querying running PostgreSQL: {e.msg}, falling back to pg_controldata")
+
+  # Fall back to pg_controldata output
   result = self.getLocalTimelineLsnFromControldata()
 
   if result.timeline.isSome and result.lsn.isSome:
@@ -338,13 +370,55 @@ proc logPrimaryHistory(history: seq[tuple[timeline: int, switchpoint: int64, rea
 
 proc checkTimelineAndLsn(self: Rewind, leader: Leader) =
   ## Check timeline and LSN against the leader.
+  ## Compares local timeline with leader's timeline to determine if pg_rewind is needed.
   let (inRecovery, localTimeline, localLsn) = self.getLocalTimelineLsn()
 
   if localTimeline.isNone or localLsn.isNone:
+    logger.warning("Could not determine local timeline or LSN")
     return
 
-  # Would perform timeline comparison with leader
-  # and set self.state accordingly
+  let localTl = localTimeline.get
+  let localLsnVal = localLsn.get
+
+  # Get leader's timeline from member data
+  if leader.member == nil or leader.member.data == nil:
+    logger.warning("Leader member data not available")
+    return
+
+  let leaderTimeline = leader.member.data.timeline
+  let leaderLsn = leader.member.data.xlogLocation
+
+  logger.info(fmt"Comparing local (timeline={localTl}, lsn={formatLsn(localLsnVal)}) with leader (timeline={leaderTimeline}, lsn={formatLsn(leaderLsn)})")
+
+  # If same timeline, check if we're behind or at same position
+  if localTl == leaderTimeline:
+    if localLsnVal <= leaderLsn:
+      logger.info("Same timeline and local LSN is not ahead of leader - no rewind needed")
+      self.state = rsNotNeed
+    else:
+      # Local is ahead on same timeline - this shouldn't happen normally
+      logger.warning("Local LSN is ahead of leader on same timeline - rewind may be needed")
+      self.state = rsNeed
+    return
+
+  # Different timelines - need to check if we diverged
+  if localTl > leaderTimeline:
+    # Local timeline is higher than leader - we definitely diverged
+    logger.info(fmt"Local timeline {localTl} > leader timeline {leaderTimeline} - rewind needed")
+    self.state = rsNeed
+    return
+
+  # Local timeline is lower than leader - check if we need to catch up
+  # This typically means leader promoted and we're still on old timeline
+  if inRecovery.isSome and inRecovery.get:
+    # We're in recovery, can probably just follow the new leader
+    logger.info(fmt"Local timeline {localTl} < leader timeline {leaderTimeline}, in recovery - no rewind needed")
+    self.state = rsNotNeed
+  else:
+    # Not in recovery with lower timeline - may need rewind depending on divergence point
+    logger.info(fmt"Local timeline {localTl} < leader timeline {leaderTimeline}, checking if rewind needed")
+    # Conservative approach: if we're not in recovery and have different timeline, suggest rewind
+    self.state = rsNeed
 
 proc rewindOrReinitializeNeededAndPossible*(self: Rewind, leader: Leader): bool =
   ## Check if rewind or reinitialize is needed and possible.

@@ -4,11 +4,28 @@
 ## if Patroni becomes unresponsive.
 
 import std/[json, locks, options, strutils, tables, strformat]
+when defined(linux):
+  import std/posix
 import ../config
 import ../exceptions
 import ../log
 
 export exceptions
+
+# Linux watchdog ioctl constants
+when defined(linux):
+  const
+    WATCHDOG_IOCTL_BASE = 'W'
+    WDIOC_GETSUPPORT = 0x80285700'u  # IOR('W', 0, sizeof(watchdog_info))
+    WDIOC_GETSTATUS = 0x80045701'u   # IOR('W', 1, sizeof(int))
+    WDIOC_GETBOOTSTATUS = 0x80045702'u # IOR('W', 2, sizeof(int))
+    WDIOC_GETTEMP = 0x80045703'u     # IOR('W', 3, sizeof(int))
+    WDIOC_SETOPTIONS = 0x40045704'u  # IOW('W', 4, sizeof(int))
+    WDIOC_KEEPALIVE = 0x80045705'u   # IOR('W', 5, sizeof(int))
+    WDIOC_SETTIMEOUT = 0xC0045706'u  # IOWR('W', 6, sizeof(int))
+    WDIOC_GETTIMEOUT = 0x80045707'u  # IOR('W', 7, sizeof(int))
+    WDIOS_DISABLECARD = 0x0001
+    WDIOS_ENABLECARD = 0x0002
 
 let logger = getLogger("patroni.watchdog.base")
 
@@ -23,6 +40,14 @@ type
 
   NullWatchdog* = ref object of WatchdogBase
     ## Null implementation that does nothing.
+
+  LinuxWatchdogDevice* = ref object of WatchdogBase
+    ## Linux hardware watchdog device implementation.
+    ## Uses /dev/watchdog to communicate with the kernel watchdog driver.
+    fd*: cint
+    device*: string
+    running*: bool
+    timeout*: Option[int]
 
   WatchdogConfig* = ref object
     ## Helper to contain a snapshot of configuration.
@@ -122,6 +147,99 @@ method isRunning*(self: NullWatchdog): bool =
 method describe*(self: NullWatchdog): string =
   result = "NullWatchdog"
 
+# LinuxWatchdogDevice implementation
+
+when defined(linux):
+  proc newLinuxWatchdogDevice*(device: string = "/dev/watchdog"): LinuxWatchdogDevice =
+    ## Create a new LinuxWatchdogDevice instance.
+    new(result)
+    result.device = device
+    result.fd = -1
+    result.running = false
+    result.timeout = none(int)
+
+  method open*(self: LinuxWatchdogDevice) =
+    ## Open the watchdog device.
+    if self.running:
+      return
+
+    self.fd = posix.open(self.device.cstring, O_WRONLY)
+    if self.fd < 0:
+      raise newWatchdogError(fmt"Failed to open watchdog device {self.device}: {strerror(errno)}")
+
+    self.running = true
+    logger.info(fmt"Opened watchdog device {self.device}")
+
+  method close*(self: LinuxWatchdogDevice) =
+    ## Close the watchdog device.
+    ## Writing 'V' (magic close character) disables the watchdog on close.
+    if not self.running or self.fd < 0:
+      return
+
+    # Write magic close character to disable watchdog
+    let magicClose = "V"
+    discard posix.write(self.fd, magicClose.cstring, 1)
+    discard posix.close(self.fd)
+    self.fd = -1
+    self.running = false
+    logger.info(fmt"Closed watchdog device {self.device}")
+
+  method keepalive*(self: LinuxWatchdogDevice) =
+    ## Send keepalive to the watchdog.
+    if not self.running or self.fd < 0:
+      return
+
+    # Writing any character keeps the watchdog alive
+    let keepaliveChar = "\0"
+    let written = posix.write(self.fd, keepaliveChar.cstring, 1)
+    if written < 0:
+      raise newWatchdogError(fmt"Failed to send keepalive: {strerror(errno)}")
+
+  method isRunning*(self: LinuxWatchdogDevice): bool =
+    result = self.running
+
+  method isNull*(self: LinuxWatchdogDevice): bool =
+    result = false
+
+  method canBeDisabled*(self: LinuxWatchdogDevice): bool =
+    ## Linux watchdog can typically be disabled with magic close.
+    result = true
+
+  method hasSetTimeout*(self: LinuxWatchdogDevice): bool =
+    result = true
+
+  method setTimeout*(self: LinuxWatchdogDevice, timeout: int) =
+    ## Set the watchdog timeout using ioctl.
+    if not self.running or self.fd < 0:
+      return
+
+    var timeoutVal: cint = timeout.cint
+    let ret = ioctl(self.fd, WDIOC_SETTIMEOUT, addr timeoutVal)
+    if ret < 0:
+      raise newWatchdogError(fmt"Failed to set watchdog timeout: {strerror(errno)}")
+
+    self.timeout = some(timeoutVal.int)
+    logger.info(fmt"Set watchdog timeout to {timeoutVal} seconds")
+
+  method getTimeout*(self: LinuxWatchdogDevice): Option[int] =
+    ## Get the current watchdog timeout using ioctl.
+    if not self.running or self.fd < 0:
+      return none(int)
+
+    if self.timeout.isSome:
+      return self.timeout
+
+    var timeoutVal: cint = 0
+    let ret = ioctl(self.fd, WDIOC_GETTIMEOUT, addr timeoutVal)
+    if ret < 0:
+      return none(int)
+
+    self.timeout = some(timeoutVal.int)
+    result = self.timeout
+
+  method describe*(self: LinuxWatchdogDevice): string =
+    result = fmt"LinuxWatchdogDevice({self.device})"
+
 # WatchdogConfig implementation
 
 proc newWatchdogConfig*(config: Config): WatchdogConfig =
@@ -193,8 +311,13 @@ proc getImpl*(self: WatchdogConfig): WatchdogBase =
   ## Get the appropriate watchdog implementation.
   when defined(linux):
     if self.driver == "default":
-      # Would use LinuxWatchdogDevice here
-      result = newNullWatchdog()
+      # Use Linux watchdog device
+      let device = self.driverConfig.getOrDefault("device")
+      let devicePath = if device != nil and device.kind == JString:
+        device.getStr("/dev/watchdog")
+      else:
+        "/dev/watchdog"
+      result = newLinuxWatchdogDevice(devicePath)
     else:
       result = newNullWatchdog()
   else:
