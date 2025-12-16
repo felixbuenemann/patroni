@@ -1,9 +1,12 @@
 package ha
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/patroni/patroni-go/internal/config"
+	"github.com/patroni/patroni-go/internal/testutil"
 	"github.com/patroni/patroni-go/pkg/types"
 )
 
@@ -402,4 +405,428 @@ func selectBestCandidate(members []*types.Member) string {
 		return ""
 	}
 	return best.Name
+}
+
+// ============= HA State Tests =============
+
+func TestHAStateString(t *testing.T) {
+	tests := []struct {
+		state    HAState
+		expected string
+	}{
+		{HAStateStarting, "starting"},
+		{HAStateRunning, "running"},
+		{HAStatePaused, "paused"},
+		{HAStateStopped, "stopped"},
+		{HAState(99), "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			if tt.state.String() != tt.expected {
+				t.Errorf("HAState.String() = %q, want %q", tt.state.String(), tt.expected)
+			}
+		})
+	}
+}
+
+func TestNewHA(t *testing.T) {
+	cfg := &config.Config{
+		Name:     "node1",
+		Scope:    "mycluster",
+		LoopWait: 10,
+		TTL:      30,
+	}
+
+	mockDCS := testutil.NewMockDCS()
+
+	ha := New(cfg, mockDCS, nil)
+
+	if ha == nil {
+		t.Fatal("New() returned nil")
+	}
+	if ha.state != HAStateStarting {
+		t.Errorf("Initial state = %v, want HAStateStarting", ha.state)
+	}
+	if ha.dcs != mockDCS {
+		t.Error("DCS not set correctly")
+	}
+	if ha.wakeupCh == nil {
+		t.Error("wakeupCh should be initialized")
+	}
+	if ha.stopCh == nil {
+		t.Error("stopCh should be initialized")
+	}
+}
+
+func TestHAState(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	if ha.State() != HAStateStarting {
+		t.Errorf("State() = %v, want HAStateStarting", ha.State())
+	}
+
+	ha.setState(HAStateRunning)
+	if ha.State() != HAStateRunning {
+		t.Errorf("State() = %v, want HAStateRunning", ha.State())
+	}
+}
+
+func TestHAIsLeader(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	if ha.IsLeader() {
+		t.Error("IsLeader() should return false initially")
+	}
+
+	ha.mu.Lock()
+	ha.isLeader = true
+	ha.mu.Unlock()
+
+	if !ha.IsLeader() {
+		t.Error("IsLeader() should return true after setting")
+	}
+}
+
+func TestHAIsPaused(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	if ha.IsPaused() {
+		t.Error("IsPaused() should return false initially")
+	}
+
+	ha.setState(HAStatePaused)
+
+	if !ha.IsPaused() {
+		t.Error("IsPaused() should return true after setting paused state")
+	}
+}
+
+func TestHAIsBusy(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	if ha.IsBusy() {
+		t.Error("IsBusy() should return false initially")
+	}
+
+	ha.mu.Lock()
+	ha.busy = true
+	ha.mu.Unlock()
+
+	if !ha.IsBusy() {
+		t.Error("IsBusy() should return true after setting")
+	}
+}
+
+func TestHAGetCluster(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	// Initial nil cluster
+	if ha.GetCluster() != nil {
+		t.Error("GetCluster() should return nil initially")
+	}
+
+	// Set cluster
+	cluster := &types.Cluster{
+		InitializeVersion: 1,
+		Members: []*types.Member{
+			{Name: "node1"},
+		},
+	}
+	ha.mu.Lock()
+	ha.cluster = cluster
+	ha.mu.Unlock()
+
+	got := ha.GetCluster()
+	if got == nil {
+		t.Fatal("GetCluster() returned nil after setting")
+	}
+	if got.InitializeVersion != 1 {
+		t.Errorf("InitializeVersion = %d, want 1", got.InitializeVersion)
+	}
+}
+
+func TestHAGetEffectiveTags(t *testing.T) {
+	cfg := &config.Config{
+		LoopWait: 10,
+	}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	tags := ha.GetEffectiveTags()
+
+	// Default tags should be empty/false
+	if tags.NoFailover {
+		t.Error("NoFailover should be false by default")
+	}
+	if tags.NoLoadbalance {
+		t.Error("NoLoadbalance should be false by default")
+	}
+}
+
+func TestHAWakeup(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	// Wakeup should not block
+	ha.Wakeup()
+
+	// Second wakeup should also not block (channel is buffered)
+	ha.Wakeup()
+
+	// Verify channel has signal
+	select {
+	case <-ha.wakeupCh:
+		// Expected
+	default:
+		t.Error("wakeupCh should have signal after Wakeup()")
+	}
+}
+
+func TestHAStop(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	ha.Stop()
+
+	// Verify stop channel is closed
+	select {
+	case <-ha.stopCh:
+		// Expected - channel is closed
+	case <-time.After(100 * time.Millisecond):
+		t.Error("stopCh should be closed after Stop()")
+	}
+}
+
+func TestHAPauseResume(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+	ha.setState(HAStateRunning)
+
+	// Pause
+	ha.Pause()
+	if !ha.IsPaused() {
+		t.Error("IsPaused() should be true after Pause()")
+	}
+
+	// Resume
+	ha.Resume()
+	if ha.IsPaused() {
+		t.Error("IsPaused() should be false after Resume()")
+	}
+	if ha.State() != HAStateRunning {
+		t.Errorf("State() = %v, want HAStateRunning after Resume()", ha.State())
+	}
+}
+
+func TestHAScheduleRestart(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	futureTime := time.Now().Add(1 * time.Hour)
+
+	err := ha.ScheduleRestart(futureTime, time.Time{})
+	if err != nil {
+		t.Errorf("ScheduleRestart() error = %v", err)
+	}
+
+	restart := ha.GetScheduledRestart()
+	if restart == nil {
+		t.Fatal("GetScheduledRestart() returned nil")
+	}
+	if !restart.Schedule.Equal(futureTime) {
+		t.Errorf("Schedule time mismatch")
+	}
+}
+
+func TestHACancelScheduledRestart(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	futureTime := time.Now().Add(1 * time.Hour)
+	ha.ScheduleRestart(futureTime, time.Time{})
+
+	err := ha.CancelScheduledRestart()
+	if err != nil {
+		t.Errorf("CancelScheduledRestart() error = %v", err)
+	}
+
+	if ha.GetScheduledRestart() != nil {
+		t.Error("GetScheduledRestart() should return nil after cancel")
+	}
+}
+
+func TestHAManualFailover(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	ctx := context.Background()
+	err := ha.ManualFailover(ctx, "leader1", "candidate1", nil)
+	if err != nil {
+		t.Errorf("ManualFailover() error = %v", err)
+	}
+
+	if mockDCS.SetFailoverCalls != 1 {
+		t.Errorf("SetFailoverValue calls = %d, want 1", mockDCS.SetFailoverCalls)
+	}
+}
+
+func TestHACancelFailover(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	ctx := context.Background()
+	err := ha.CancelFailover(ctx)
+	if err != nil {
+		t.Errorf("CancelFailover() error = %v", err)
+	}
+
+	if mockDCS.DeleteFailoverCalls != 1 {
+		t.Errorf("DeleteFailover calls = %d, want 1", mockDCS.DeleteFailoverCalls)
+	}
+}
+
+func TestHASetConfig(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	ctx := context.Background()
+	newConfig := map[string]interface{}{
+		"loop_wait": 15,
+		"ttl":       45,
+	}
+
+	err := ha.SetConfig(ctx, newConfig)
+	if err != nil {
+		t.Errorf("SetConfig() error = %v", err)
+	}
+
+	if mockDCS.SetConfigCalls != 1 {
+		t.Errorf("SetConfigValue calls = %d, want 1", mockDCS.SetConfigCalls)
+	}
+}
+
+func TestHAReinitialize(t *testing.T) {
+	// Skip this test since Reinitialize requires a PostgreSQL instance
+	// and would panic with nil pg
+	t.Skip("Skipping test that requires PostgreSQL instance")
+}
+
+func TestHAGetConfig(t *testing.T) {
+	cfg := &config.Config{LoopWait: 10}
+	mockDCS := testutil.NewMockDCS()
+	ha := New(cfg, mockDCS, nil)
+
+	// No cluster
+	config := ha.GetConfig()
+	if config != nil {
+		t.Error("GetConfig() should return nil when no cluster")
+	}
+
+	// With cluster config
+	ha.mu.Lock()
+	ha.cluster = &types.Cluster{
+		Config: &types.ClusterConfig{
+			Data: map[string]interface{}{
+				"loop_wait": 10,
+			},
+		},
+	}
+	ha.mu.Unlock()
+
+	config = ha.GetConfig()
+	if config == nil {
+		t.Fatal("GetConfig() returned nil")
+	}
+	if config["loop_wait"].(int) != 10 {
+		t.Errorf("loop_wait = %v, want 10", config["loop_wait"])
+	}
+}
+
+func TestFailsafe(t *testing.T) {
+	mockDCS := testutil.NewMockDCS()
+	fs := NewFailsafe(mockDCS)
+
+	if fs == nil {
+		t.Fatal("NewFailsafe() returned nil")
+	}
+
+	// Initial state
+	if fs.IsActive() {
+		t.Error("IsActive() should be false initially")
+	}
+
+	// Update with data should make it active
+	fs.Update(map[string]interface{}{
+		"name":     "node1",
+		"conn_url": "postgres://localhost:5432",
+		"api_url":  "http://localhost:8008",
+	})
+
+	if !fs.IsActive() {
+		t.Error("IsActive() should be true after Update()")
+	}
+
+	// Reset should deactivate
+	fs.Reset()
+	if fs.IsActive() {
+		t.Error("IsActive() should be false after Reset()")
+	}
+}
+
+func TestScheduledRestartStruct(t *testing.T) {
+	now := time.Now()
+	restart := &ScheduledRestart{
+		Schedule:            now,
+		PostmasterStartTime: now.Add(-time.Hour),
+	}
+
+	if restart.Schedule != now {
+		t.Error("Schedule time mismatch")
+	}
+	if restart.PostmasterStartTime.IsZero() {
+		t.Error("PostmasterStartTime should be set")
+	}
+}
+
+// ============= Integration-style Tests =============
+
+func TestHARunCycleWithMockDCS(t *testing.T) {
+	// Skip this test since runCycle requires a PostgreSQL instance for touchMember
+	t.Skip("Skipping test that requires PostgreSQL instance")
+}
+
+func TestHADetermineActionNoCluster(t *testing.T) {
+	// Skip tests that require PostgreSQL instance since determineAction calls pg.State()
+	t.Skip("Skipping test that requires PostgreSQL instance")
+}
+
+func TestHADetermineActionUninitializedCluster(t *testing.T) {
+	t.Skip("Skipping test that requires PostgreSQL instance")
+}
+
+func TestHADetermineActionAsPrimary(t *testing.T) {
+	t.Skip("Skipping test that requires PostgreSQL instance")
+}
+
+func TestHADetermineActionAsReplica(t *testing.T) {
+	t.Skip("Skipping test that requires PostgreSQL instance")
 }
