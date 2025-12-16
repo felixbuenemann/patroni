@@ -2,7 +2,7 @@
 ##
 ## :var pg_perm: instance of the FilePermissions object.
 
-import std/[os, posix, strformat]
+import std/[posix, strformat]
 import ./log
 
 let logger = getLogger("patroni.file_perm")

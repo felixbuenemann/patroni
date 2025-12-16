@@ -2,6 +2,8 @@
 
 import std/[json, options, tables, unittest]
 import ../patroni/postgresql/mpp
+import ../patroni/postgresql/mpp_factory
+import ../patroni/postgresql/mpp/citus
 
 suite "MPP - AbstractMPP":
   test "newAbstractMPP creates MPP with config":
@@ -174,13 +176,14 @@ suite "MPP - Factory Functions":
     check mpp != nil
     check mpp.isEnabled == false
 
-  test "getMpp returns NullMPP when citus config is empty":
+  test "getMpp returns Citus when citus config exists":
     var config = newJObject()
     config["citus"] = newJObject()
     let mpp = getMpp(config)
     check mpp != nil
-    # Returns NullMPP since full citus implementation is separate
+    # Citus instance with empty config is disabled
     check mpp.isEnabled == false
+    check mpp of Citus
 
   test "getHandler returns NullMPPHandler for NullMPP":
     let mpp = newNullMPP()

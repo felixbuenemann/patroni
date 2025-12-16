@@ -4,12 +4,8 @@
 ## architecture. This module provides abstract interfaces for MPP cluster
 ## management.
 
-import std/[json, options, re, strformat, strutils, tables]
+import std/[json, options, re, strutils, tables]
 import ../dcs
-import ../exceptions
-import ../log
-
-let logger = getLogger("patroni.postgresql.mpp")
 
 type
   AbstractMPP* = ref object of RootObj
@@ -197,24 +193,6 @@ iterator iterMppClasses*(config: JsonNode): tuple[name: string, available: bool]
   ## :yields: Tuples of (name, available).
   yield ("citus", "citus" in config)
 
-proc getMpp*(config: JsonNode): AbstractMPP =
-  ## Get the appropriate MPP implementation.
-  ##
-  ## :param config: Patroni configuration.
-  ## :returns: MPP implementation or NullMPP.
-  if "citus" in config:
-    let citusConfig = config["citus"]
-    if citusConfig.kind == JObject:
-      # Would return Citus MPP here
-      # For now, return Null since Citus is separate
-      return newNullMPP()
-
-  return newNullMPP()
-
-proc getHandler*(self: AbstractMPP, postgresql: pointer): AbstractMPPHandler =
-  ## Get handler implementation for this MPP.
-  ##
-  ## :param postgresql: Reference to Postgresql object.
-  ## :returns: Handler implementation.
-  result = newNullMPPHandler(postgresql, self.config)
+## Note: getMpp and getHandler factory functions are in mpp_factory.nim
+## to avoid circular dependency with citus.nim
 

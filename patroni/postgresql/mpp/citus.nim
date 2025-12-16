@@ -3,12 +3,10 @@
 ## This module implements the Citus distributed PostgreSQL extension handler,
 ## managing pg_dist_node metadata and worker coordination.
 
-import std/[hashes, json, locks, options, re, sequtils, sets, strformat, strutils, tables, times, uri]
+import std/[hashes, json, locks, options, re, sequtils, sets, strformat, strutils, tables]
 import ../../dcs
 import ../../psycopg
-import ../../utils
 import ../../log
-import ../misc
 import ../mpp
 
 export mpp

@@ -1,6 +1,6 @@
 ## PostgreSQL miscellaneous utilities and enumerations.
 
-import std/[os, strutils, sequtils, strformat]
+import std/[strutils, sequtils, strformat]
 import ../exceptions
 import ../log
 
